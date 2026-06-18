@@ -98,6 +98,19 @@ export const config = {
     chatId: process.env.TELEGRAM_CHAT_ID || '',
   },
 
+  // --- google sheets report (optional) ---
+  // Веде трекер заявок у Google Таблиці. Вмикається лише коли REPORT_ENABLED=true
+  // і задані OAuth-креди. Авторизація — OAuth user-token (діє від акаунта,
+  // що володіє таблицею). Деталі — у src/report.js.
+  report: {
+    enabled: bool(process.env.REPORT_ENABLED, false),
+    spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID || '',
+    sheetName: process.env.GOOGLE_SHEETS_TAB || '', // порожньо = перша вкладка
+    clientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
+    clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET || '',
+    refreshToken: process.env.GOOGLE_OAUTH_REFRESH_TOKEN || '',
+  },
+
   logLevel: (process.env.LOG_LEVEL || 'info').toLowerCase(),
 };
 
@@ -115,7 +128,7 @@ export const ALREADY_SENT_PATTERNS = [
 ];
 
 // Ukrainian phone formats to recognise in comment fields / chat:
-//   380XXXXXXXXX (12), 80XXXXXXXXX (11), 0XXXXXXXXX (10).
+// 380XXXXXXXXX (12), 80XXXXXXXXX (11), 0XXXXXXXXX (10).
 // Boundaries prevent matching inside a longer digit run.
 export const PHONE_RE = /(?<!\d)(?:380\d{9}|80\d{9}|0\d{9})(?!\d)/g;
 
@@ -124,10 +137,10 @@ export const BG_ASK_PATTERNS = [/перевізник/i, /контакт.*тур
 export const BG_REMINDER_PATTERNS = [/нагадуємо.*контакт/i, /нагадуємо.*воді/i];
 
 // ----------------------------------------------------------------------------
-//  SELECTORS — the brittle part. These are best-effort guesses based on the
-//  observed UI (English field labels, Ukrainian/Russian content). Verify and
-//  fix them against the live DOM with:  npm run codegen   (see README).
-//  Prefer text/role/label locators over fragile CSS where possible.
+// SELECTORS — the brittle part. These are best-effort guesses based on the
+// observed UI (English field labels, Ukrainian/Russian content). Verify and
+// fix them against the live DOM with: npm run codegen (see README).
+// Prefer text/role/label locators over fragile CSS where possible.
 // ----------------------------------------------------------------------------
 export const sel = {
   login: {
@@ -160,7 +173,7 @@ export const sel = {
       '#bundle-status, [data-filter="status"], .filter-status, label:has-text("Status") ~ * .multiselect, text=/^(In Work|Confirmed)/',
     // A checkbox option inside the open Status dropdown, located by its label text.
     statusOptionByLabel: (label) =>
-      `:is(.dropdown, .multiselect, .filter)  :is(label,li,div):has-text("${label}")`,
+      `:is(.dropdown, .multiselect, .filter) :is(label,li,div):has-text("${label}")`,
 
     // Two "Interval of check in" date inputs (must be cleared so they don't filter).
     checkInInputs:
@@ -179,8 +192,10 @@ export const sel = {
     // All rendered message bubbles' text inside the panel.
     messages: '.message, .chat-message, [class*="message" i]',
     // Composer fields.
-    departmentSelect: 'select[name*="department" i], select#department, label:has-text("DEPARTMENT") ~ select, label:has-text("DEPARTMENT") ~ * select',
-    subjectSelect: 'select[name*="subject" i], select[name*="theme" i], label:has-text("MESSAGE SUBJECT") ~ select, label:has-text("MESSAGE SUBJECT") ~ * select',
+    departmentSelect:
+      'select[name*="department" i], select#department, label:has-text("DEPARTMENT") ~ select, label:has-text("DEPARTMENT") ~ * select',
+    subjectSelect:
+      'select[name*="subject" i], select[name*="theme" i], label:has-text("MESSAGE SUBJECT") ~ select, label:has-text("MESSAGE SUBJECT") ~ * select',
     textArea: 'textarea[placeholder*="Compose" i], textarea',
     toEveryoneButton: 'button:has-text("To everyone"), :is(button,label):has-text("To everyone")',
     toAdministratorsButton: 'button:has-text("Send to administrators")',

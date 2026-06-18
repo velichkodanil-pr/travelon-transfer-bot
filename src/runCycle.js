@@ -5,6 +5,7 @@ import { log } from './logger.js';
 import { wasSent, markSent } from './store.js';
 import { notify, notifyEnabled } from './notify.js';
 import { runBulgaria } from './bulgaria.js';
+import { reportEnabled, upsertRows } from './report.js';
 
 export async function runCycle() {
   const startedAt = new Date();
@@ -18,6 +19,7 @@ export async function runCycle() {
     errors: [],
   };
   let bg = null;
+  let bookings = []; // hoisted so the report step (after the cycle) can see it
 
   const client = new TravelonClient();
   try {
@@ -28,7 +30,7 @@ export async function runCycle() {
     await client.setStatusFilter();
     await client.applyFilter();
 
-    const bookings = await client.listMatchingBookings();
+    bookings = await client.listMatchingBookings();
     summary.matched = bookings.map((b) => `${b.id}/${b.country}`);
 
     let sends = 0;
@@ -102,6 +104,53 @@ export async function runCycle() {
   if (bg && bg.report) report += '\n\n' + bg.report;
   log.info('Cycle summary:\n' + report);
   if (notifyEnabled()) await notify(report);
+
+  // --- Google Sheet tracker (best-effort; never breaks the cycle) ----------
+  if (reportEnabled()) {
+    try {
+      // Generic-flow rows (Greece/Albania/Croatia/Spain): id, country, creation
+      // date + the outcome derived from the summary buckets. These countries
+      // only get an agent request — phone reading/writing is Bulgaria-only.
+      const genericRows = bookings.map((b) => {
+        let asked = '';
+        let status = 'Оброблено';
+        if (summary.sent.includes(b.id)) {
+          asked = 'так';
+          status = 'Запит надіслано';
+        } else if (summary.wouldSend.includes(b.id)) {
+          asked = config.dryRun ? 'ні (відписав би)' : 'так';
+          status = 'DRY-RUN: відписав би';
+        } else if (summary.skippedAlready.includes(b.id)) {
+          asked = 'так';
+          status = 'Вже є запит у чаті';
+        } else if (summary.skippedStore.includes(b.id)) {
+          asked = 'так';
+          status = 'Запит надіслано раніше';
+        }
+        return {
+          bookingId: b.id,
+          elineRef: '',
+          country: b.country,
+          bookingDate: b.dateISO || '',
+          checkinDate: '',
+          phonePresent: '',
+          asked,
+          agentNumber: '',
+          writtenInBooking: '',
+          writtenInEline: '',
+          status,
+          note: config.dryRun ? 'DRY-RUN' : '',
+        };
+      });
+
+      const bgRows = bg && bg.rows ? bg.rows : [];
+      const res = await upsertRows([...genericRows, ...bgRows]);
+      log.info(`Report: Google Sheet — ${res.updated} оновлено, ${res.appended} додано.`);
+      report += `\nReport: Sheet +${res.appended} нових / ${res.updated} оновлено`;
+    } catch (e) {
+      log.warn('Report update failed (continuing): ' + e.message);
+    }
+  }
 
   return { ...summary, bulgaria: bg };
 }

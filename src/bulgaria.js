@@ -1,12 +1,12 @@
 // Bulgaria + Eline workflow.
 // For Confirmed/Confirmed Print Bulgaria bookings (created >= configured date)
 // whose Transport provider is "E.Line Tour":
-//   1. read the tourist phone from the two comment fields;
-//   2. else from the booking chat (agent reply);
-//   3. if found -> write it into BOTH comment fields (when taken from chat) and
-//      into the Eline portal (one phone per passenger);
-//   4. if nowhere -> ask the agent; next day at 12:00 (Kyiv) send ONE reminder;
-//      keep re-checking until the phone arrives, then act and stop.
+// 1. read the tourist phone from the two comment fields;
+// 2. else from the booking chat (agent reply);
+// 3. if found -> write it into BOTH comment fields (when taken from chat) and
+//    into the Eline portal (one phone per passenger);
+// 4. if nowhere -> ask the agent; next day at 12:00 (Kyiv) send ONE reminder;
+//    keep re-checking until the phone arrives, then act and stop.
 // DRY_RUN: detects + logs intended actions, writes/sends nothing.
 import { config, BG_ASK_PATTERNS, BG_REMINDER_PATTERNS } from './config.js';
 import { log } from './logger.js';
@@ -87,8 +87,27 @@ export async function runBulgaria(travelon) {
     waiting: [],
     skippedDone: [],
     errors: [],
+    rows: [], // per-booking rows for the Google Sheet report
   };
   if (!config.bulgaria.enabled) return summary;
+
+  // Builds a report row for a candidate, with sensible blank defaults.
+  const mkRow = (c, o = {}) => ({
+    bookingId: c.id,
+    elineRef: c.elineNum,
+    country: config.bulgaria.country,
+    bookingDate: c.dateISO || '',
+    checkinDate: '',
+    phonePresent: '',
+    asked: '',
+    agentNumber: '',
+    writtenInBooking: '',
+    writtenInEline: '',
+    status: '',
+    note: '',
+    ...o,
+  });
+  const dryTag = config.dryRun ? 'DRY-RUN' : '';
 
   // 1) Scan the list for Bulgaria + Eline + Confirmed candidates created >= cutoff.
   // Page via direct ?page=N URLs (reliable, unlike clicking a flaky "Next" link).
@@ -143,6 +162,16 @@ export async function runBulgaria(travelon) {
         // the store entirely (re-evaluate every cycle, persist nothing).
         if (w?.doneAt && !config.dryRun) {
           summary.skippedDone.push(c.id);
+          summary.rows.push(
+            mkRow(c, {
+              phonePresent: 'так',
+              agentNumber: w.phones ? w.phones.join(' ') : '',
+              writtenInBooking: 'так',
+              writtenInEline: 'так',
+              status: 'Зроблено (раніше)',
+              note: 'Опрацьовано в попередньому циклі',
+            })
+          );
           continue;
         }
 
@@ -153,6 +182,16 @@ export async function runBulgaria(travelon) {
         if (phones.length) {
           await writeToEline(c, phones, summary, ensureEline);
           await persist(c.id, { doneAt: new Date().toISOString(), phones, source: 'comments' });
+          summary.rows.push(
+            mkRow(c, {
+              phonePresent: 'так',
+              agentNumber: phones.join(' '),
+              writtenInBooking: 'так',
+              writtenInEline: config.dryRun ? 'ні (вписав би)' : 'так',
+              status: 'Зроблено',
+              note: [dryTag, 'телефон уже в коментарях заявки'].filter(Boolean).join(' · '),
+            })
+          );
           continue;
         }
 
@@ -172,6 +211,16 @@ export async function runBulgaria(travelon) {
           );
           await writeToEline(c, phones, summary, ensureEline);
           await persist(c.id, { doneAt: new Date().toISOString(), phones, source: 'chat' });
+          summary.rows.push(
+            mkRow(c, {
+              phonePresent: 'так',
+              agentNumber: phones.join(' '),
+              writtenInBooking: config.dryRun ? 'ні (вписав би)' : 'так',
+              writtenInEline: config.dryRun ? 'ні (вписав би)' : 'так',
+              status: 'Зроблено',
+              note: [dryTag, 'номер із чату агента'].filter(Boolean).join(' · '),
+            })
+          );
           continue;
         }
 
@@ -194,6 +243,14 @@ export async function runBulgaria(travelon) {
             log.info(`[BG] ${c.id}: asked agent for tourist phone.`);
           }
           await persist(c.id, { askedAt: new Date().toISOString() });
+          summary.rows.push(
+            mkRow(c, {
+              phonePresent: 'ні',
+              asked: config.dryRun ? 'ні (запитав би)' : 'так',
+              status: 'Очікує — запит надіслано',
+              note: dryTag,
+            })
+          );
         } else if (!reminded && shouldRemindNow(w?.askedAt)) {
           if (config.dryRun) {
             summary.reminded.push(`${c.id} (dry)`);
@@ -208,14 +265,31 @@ export async function runBulgaria(travelon) {
             log.info(`[BG] ${c.id}: sent reminder.`);
           }
           await persist(c.id, { remindedAt: new Date().toISOString() });
+          summary.rows.push(
+            mkRow(c, {
+              phonePresent: 'ні',
+              asked: config.dryRun ? 'повторно (нагадав би)' : 'повторно',
+              status: 'Очікує — нагадування',
+              note: dryTag,
+            })
+          );
         } else {
           summary.waiting.push(c.id);
+          summary.rows.push(
+            mkRow(c, {
+              phonePresent: 'ні',
+              asked: 'так',
+              status: 'Очікує відповідь агента',
+              note: dryTag,
+            })
+          );
         }
         await travelon.closeChat(c.id).catch(() => {});
       } catch (err) {
         summary.errors.push(`${c.id}: ${err.message}`);
         log.error(`[BG] booking ${c.id} failed:`, err.message);
         await travelon.screenshot(`bg-${c.id}-error`);
+        summary.rows.push(mkRow(c, { status: 'Помилка', note: err.message }));
       }
     }
   } finally {
