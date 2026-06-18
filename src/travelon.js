@@ -200,42 +200,66 @@ export class TravelonClient {
   // --- listing --------------------------------------------------------------
 
   async listMatchingBookings() {
-    const rows = this.page.locator(sel.requests.resultRows);
-    const count = await rows.count().catch(() => 0);
-    log.info(`Scanning ${count} result row(s)…`);
-
     const today = todayISOInTz(config.tz);
+
+    // Pull each row's flat text + its STATUS label in one pass. The status is the
+    // text just before "Room status" in the row's status cell (e.g. the cell reads
+    // "Confirmed Room status : New" -> status = "Confirmed"). Reading it straight
+    // from the row makes status filtering reliable and independent of the fragile
+    // Status filter dropdown.
+    const rowsData = await this.page
+      .locator(sel.requests.resultRows)
+      .evaluateAll((trs) =>
+        trs.map((tr) => {
+          const text = (tr.innerText || '').replace(/\s+/g, ' ').trim();
+          const statusCell = Array.from(tr.querySelectorAll('td')).find((td) =>
+            /Room status/i.test(td.innerText)
+          );
+          const status = statusCell
+            ? statusCell.innerText.split(/Room status/i)[0].replace(/\s+/g, ' ').trim()
+            : null;
+          return { text, status };
+        })
+      )
+      .catch(() => []);
+
+    log.info(`Scanning ${rowsData.length} result row(s)…`);
     const out = [];
 
-    for (let i = 0; i < count; i++) {
-      const text = (await rows.nth(i).innerText().catch(() => '')) || '';
-      const flat = text.replace(/\s+/g, ' ').trim();
+    for (const row of rowsData) {
+      const flat = row.text;
       if (!flat) continue;
 
       const idMatch = flat.match(/\b(\d{5})\b/); // booking id badge (5 digits)
-      const dateMatch = flat.match(/(\d{2}\.\d{2}\.\d{4})/); // first = creation date
+      const dateMatch = flat.match(/(\d{2}\.\d{2}\.\d{4})/); // first = creation (request) date
       if (!idMatch || !dateMatch) continue;
 
+      // Country (from the "State" column text).
       const country = COUNTRY_RE.find((c) => c.re.test(flat));
       if (!country) continue;
 
+      // Creation date must be today or later (when ONLY_TODAY=true).
       const iso = ddmmyyyyToISO(dateMatch[1]);
-      if (config.onlyToday && (!iso || iso < today)) {
-        // Rows are sorted newest-first, so once we drop below today we can stop.
-        if (iso && iso < today) break;
-        continue;
-      }
+      if (config.onlyToday && (!iso || iso < today)) continue;
+
+      // Status must EXACTLY match one of the target statuses (e.g. "Confirmed",
+      // "Confirmed Print"). This excludes "In Work", "Not Confirmed", etc.
+      if (!row.status || !config.targetStatuses.includes(row.status)) continue;
 
       out.push({
         id: idMatch[1],
         country: country.name,
+        status: row.status,
         dateISO: iso,
         dateRaw: dateMatch[1],
-        rowIndex: i,
       });
     }
 
-    log.info(`Matched ${out.length} booking(s): ${out.map((b) => b.id).join(', ') || '—'}`);
+    log.info(
+      `Matched ${out.length} booking(s): ${
+        out.map((b) => `${b.id}[${b.status}]`).join(', ') || '—'
+      }`
+    );
     return out;
   }
 

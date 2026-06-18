@@ -24,7 +24,7 @@ export const config = {
   email: process.env.TRAVELON_EMAIL || '',
   password: process.env.TRAVELON_PASSWORD || '',
   baseUrl: (process.env.TRAVELON_BASE_URL || 'https://travelon.to').replace(/\/$/, ''),
-  loginUrl: process.env.TRAVELON_LOGIN_URL || 'https://travelon.to/site/login',
+  loginUrl: process.env.TRAVELON_LOGIN_URL || 'https://travelon.to/admin/users/sign_in',
   requestsUrl: process.env.TRAVELON_REQUESTS_URL || 'https://travelon.to/book/bundle/index',
 
   // --- behaviour ---
