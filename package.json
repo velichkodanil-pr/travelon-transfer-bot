@@ -1,0 +1,21 @@
+{
+  "name": "travelon-transfer-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "24/7 bot that asks TravelON agents for tourists' phone numbers for transfer drivers on newly confirmed bookings.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "once": "RUN_ONCE=true node src/index.js",
+    "codegen": "playwright codegen https://travelon.to",
+    "check": "node --check src/index.js && node --check src/runCycle.js && node --check src/travelon.js && node --check src/config.js && node --check src/store.js && node --check src/notify.js && node --check src/logger.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "node-cron": "^3.0.3",
+    "playwright": "1.47.2"
+  }
+}
