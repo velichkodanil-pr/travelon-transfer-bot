@@ -187,31 +187,40 @@ export const sel = {
   },
 
   chat: {
-    // The open chat modal container.
-    panel: '.modal-v2, .chatbox, [class*="chat" i][class*="modal" i], .chat-panel, .notifications-panel',
+    // The open chat drawer renders inside a `.tailwind-scope` root as a fixed
+    // right-hand panel (NOT a `.modal-v2`). It contains the "Compose…" textarea.
+    panel: [
+      'div.fixed.top-0.right-0:has(textarea)',
+      '.tailwind-scope:has(textarea[placeholder*="Compose" i])',
+      '.fixed.right-0.shadow-2xl',
+    ],
     // All rendered message bubbles' text inside the panel.
     messages: '.message, .chat-message, [class*="message" i]',
-    // Composer fields. The chat is a JS modal (opened via the row's
-    // a[onclick*="chatbox:open"] link). Its <select>s have NO name/id, and the
-    // SUBJECT <select> renders only AFTER a department is chosen — so we match by
-    // the visible label, falling back to the exact option text. firstExisting()
-    // accepts arrays and tries each entry in order.
+    // Composer fields. The drawer's <select>s have NO name/id. Anchor on the
+    // visible English labels; the real structure is:
+    //   <div class="flex flex-col gap-1"><label>DEPARTMENT</label>
+    //     <div class="relative"><select>…</select></div></div>
+    // Fallback: positional <select> inside the drawer. Do NOT use
+    // option:text-is(...) — option text inside a closed <select> is not "visible"
+    // to Playwright's text engine, so it never matched (the old broken fallback).
     departmentSelect: [
       'div.flex.flex-col:has(> label:has-text("Department")) select',
-      'select:has(option:text-is("Бронювання"))',
-      'select[name*="department" i]',
+      'div.fixed.top-0.right-0 select >> nth=0',
     ],
     subjectSelect: [
       'div.flex.flex-col:has(> label:has-text("Message subject")) select',
-      'select:has(option:text-is("Надання контактів водію автобуса"))',
-      'select[name*="subject" i], select[name*="theme" i]',
+      'div.fixed.top-0.right-0 select >> nth=1',
     ],
-    textArea: ['textarea[placeholder*="Compose" i]', 'textarea'],
+    textArea: ['textarea[placeholder*="Compose" i]', 'div.fixed.top-0.right-0 textarea'],
     toEveryoneButton: ['button:has-text("To everyone")', ':is(button,label):has-text("To everyone")'],
     toAdministratorsButton: ['button:has-text("Send to administrators")'],
     sendButton: ['button:text-is("Send")', 'button:has-text("Send")'],
-    // Close the chat modal (do NOT re-click the row icon — that re-opens it).
-    closeButton: ['button.modal-v2_close', 'button[aria-label*="close" i]', '[data-dismiss="modal"]'],
+    // Close the chat drawer (do NOT re-click the row icon — that re-opens it).
+    // closeChat() falls back to Escape if none of these match.
+    closeButton: [
+      'div.fixed.top-0.right-0 button[aria-label*="close" i]',
+      'button[aria-label*="close" i]',
+    ],
   },
 
   // TravelON booking edit page (/book/bundle/edit/{id}) — comment fields.

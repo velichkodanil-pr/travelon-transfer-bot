@@ -275,26 +275,63 @@ export class TravelonClient {
   }
 
   async openChat(id) {
-    // Clicking a chat icon toggles the panel; make sure it's closed first.
+    // The chat is a JS modal opened by emitting 'modal:chatbox:open' (the row's
+    // a[onclick*="chatbox:open"] link does exactly this). It only renders on a page
+    // where the chat bundle + window.EventBus are loaded — the requests LIST. The
+    // Bulgaria flow visits the booking EDIT page first (openEdit -> page.goto), so
+    // we must return to the list before opening; otherwise the composer never
+    // renders and sendChatMessage throws "composer fields not found". (This — not
+    // the CSS selectors — was the real cause of the Bulgaria failures.)
+    const onList = async () =>
+      /\/book\/bundle\/index/.test(this.page.url()) &&
+      (await this.page
+        .evaluate(() => !!(window.EventBus && typeof window.EventBus.emit === 'function'))
+        .catch(() => false));
+
+    if (!(await onList())) {
+      await this.page.goto(config.requestsUrl, { waitUntil: 'domcontentloaded' });
+      await this.page.waitForTimeout(1200);
+    }
+
+    // Close any previous chat drawer first (it would shadow this booking's id).
     if (await this.chatPanelVisible()) {
       await this.page.keyboard.press('Escape').catch(() => {});
       await this.page.waitForTimeout(400);
     }
-    const row = this.rowLocatorById(id);
-    const icon = row.locator(sel.requests.chatIconInRow).first();
-    if ((await icon.count().catch(() => 0)) > 0) {
-      await icon.click({ timeout: 4000 }).catch(() => {});
-    } else {
-      // Fallback: click the row itself.
-      await row.click({ timeout: 4000 }).catch(() => {});
+
+    // Preferred: open by emitting the event with the bundle id. Works regardless
+    // of which list page the row is on (no pagination dependency).
+    let opened = await this.page
+      .evaluate((bundleId) => {
+        if (window.EventBus && typeof window.EventBus.emit === 'function') {
+          window.EventBus.emit('modal:chatbox:open', {
+            locale: (window.I18n && window.I18n.locale) || 'uk',
+            bundleId,
+          });
+          return true;
+        }
+        return false;
+      }, Number(id))
+      .catch(() => false);
+
+    // Fallback: click the row's chat link if the event bus was unavailable.
+    if (!opened) {
+      const row = this.rowLocatorById(id);
+      const icon = row.locator(sel.requests.chatIconInRow).first();
+      if ((await icon.count().catch(() => 0)) > 0) {
+        await icon.click({ timeout: 4000 }).catch(() => {});
+      }
     }
-    // Wait for the panel that mentions this booking id.
+
+    // Wait for the drawer that mentions this booking id, then for the composer
+    // textarea so the caller can compose immediately.
     await this.page
       .getByText(new RegExp(`request\\s*${id}`, 'i'))
       .first()
-      .waitFor({ timeout: 6000 })
+      .waitFor({ timeout: 8000 })
       .catch(() => {});
-    await this.page.waitForTimeout(800);
+    await this.firstExisting(sel.chat.textArea, { timeout: 4000 });
+    await this.page.waitForTimeout(500);
   }
 
   async closeChat(/* id */) {
