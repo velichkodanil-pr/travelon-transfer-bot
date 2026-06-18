@@ -182,24 +182,36 @@ export const sel = {
     // Each result row. We then parse innerText for id/date/country in JS.
     resultRows: 'table tbody tr, .grid-view tbody tr, .items tbody tr',
 
-    // Within a row: the element that opens the chat panel (the speech-bubble cell).
-    chatIconInRow: 'td:has(.fa-comment), td:has(svg), .chat-icon, [data-toggle*="chat" i]',
+    // Within a row: the link that opens the chat modal (emits 'modal:chatbox:open').
+    chatIconInRow: 'a[onclick*="chatbox:open"]',
   },
 
   chat: {
-    // The open chat/notifications panel container.
-    panel: '.chat-panel, .notifications-panel, [class*="notification" i][class*="panel" i]',
+    // The open chat modal container.
+    panel: '.modal-v2, .chatbox, [class*="chat" i][class*="modal" i], .chat-panel, .notifications-panel',
     // All rendered message bubbles' text inside the panel.
     messages: '.message, .chat-message, [class*="message" i]',
-    // Composer fields.
-    departmentSelect:
-      'select[name*="department" i], select#department, label:has-text("DEPARTMENT") ~ select, label:has-text("DEPARTMENT") ~ * select',
-    subjectSelect:
-      'select[name*="subject" i], select[name*="theme" i], label:has-text("MESSAGE SUBJECT") ~ select, label:has-text("MESSAGE SUBJECT") ~ * select',
-    textArea: 'textarea[placeholder*="Compose" i], textarea',
-    toEveryoneButton: 'button:has-text("To everyone"), :is(button,label):has-text("To everyone")',
-    toAdministratorsButton: 'button:has-text("Send to administrators")',
-    sendButton: 'button:has-text("Send")',
+    // Composer fields. The chat is a JS modal (opened via the row's
+    // a[onclick*="chatbox:open"] link). Its <select>s have NO name/id, and the
+    // SUBJECT <select> renders only AFTER a department is chosen — so we match by
+    // the visible label, falling back to the exact option text. firstExisting()
+    // accepts arrays and tries each entry in order.
+    departmentSelect: [
+      'div.flex.flex-col:has(> label:has-text("Department")) select',
+      'select:has(option:text-is("Бронювання"))',
+      'select[name*="department" i]',
+    ],
+    subjectSelect: [
+      'div.flex.flex-col:has(> label:has-text("Message subject")) select',
+      'select:has(option:text-is("Надання контактів водію автобуса"))',
+      'select[name*="subject" i], select[name*="theme" i]',
+    ],
+    textArea: ['textarea[placeholder*="Compose" i]', 'textarea'],
+    toEveryoneButton: ['button:has-text("To everyone")', ':is(button,label):has-text("To everyone")'],
+    toAdministratorsButton: ['button:has-text("Send to administrators")'],
+    sendButton: ['button:text-is("Send")', 'button:has-text("Send")'],
+    // Close the chat modal (do NOT re-click the row icon — that re-opens it).
+    closeButton: ['button.modal-v2_close', 'button[aria-label*="close" i]', '[data-dismiss="modal"]'],
   },
 
   // TravelON booking edit page (/book/bundle/edit/{id}) — comment fields.

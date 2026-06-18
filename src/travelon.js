@@ -297,11 +297,12 @@ export class TravelonClient {
     await this.page.waitForTimeout(800);
   }
 
-  async closeChat(id) {
-    const row = this.rowLocatorById(id);
-    const icon = row.locator(sel.requests.chatIconInRow).first();
-    if ((await icon.count().catch(() => 0)) > 0) {
-      await icon.click({ timeout: 2000 }).catch(() => {});
+  async closeChat(/* id */) {
+    // The chat is a modal — close via its close button or Escape. Do NOT click the
+    // row icon again: that re-emits 'chatbox:open' and would just re-open the modal.
+    const close = await this.firstExisting(sel.chat.closeButton, { timeout: 1000 });
+    if (close) {
+      await close.click({ timeout: 2000 }).catch(() => {});
     } else {
       await this.page.keyboard.press('Escape').catch(() => {});
     }
@@ -321,38 +322,58 @@ export class TravelonClient {
     return ALREADY_SENT_PATTERNS.some((re) => re.test(text));
   }
 
-  // Compose and send a message in the currently-open chat. Returns true on success.
+  // Compose and send a message in the currently-open chat modal. Returns true on success.
+  // The composer is a JS modal: the department <select> is present first; the SUBJECT
+  // <select> renders only AFTER a department is chosen; Send enables once department +
+  // subject + text are all set. "To everyone" is the default recipient.
   async sendChatMessage({ department, subject, text, audience = 'everyone' }) {
-    const dept = await this.firstExisting(sel.chat.departmentSelect);
-    const subj = await this.firstExisting(sel.chat.subjectSelect);
-    const area = await this.firstExisting(sel.chat.textArea);
-    const send = await this.firstExisting(sel.chat.sendButton);
-
-    if (!dept || !subj || !area || !send) {
+    const dept = await this.firstExisting(sel.chat.departmentSelect, { timeout: 6000 });
+    const area = await this.firstExisting(sel.chat.textArea, { timeout: 3000 });
+    if (!dept || !area) {
       await this.screenshot('composer-not-found');
       throw new Error('Chat composer fields not found — verify sel.chat.* selectors.');
     }
 
-    // Native <select> elements: choose by visible label.
+    // 1) Choose the department — this causes the subject <select> to render.
     await dept.selectOption({ label: department }).catch(async () => {
       await dept.selectOption({ label: new RegExp(department, 'i') });
     });
-    await this.page.waitForTimeout(300);
+
+    // 2) Wait for the subject <select> to appear, then choose the subject.
+    const subj = await this.firstExisting(sel.chat.subjectSelect, { timeout: 6000 });
+    if (!subj) {
+      await this.screenshot('composer-subject-not-found');
+      throw new Error(
+        'Subject select did not appear after choosing department — verify sel.chat.subjectSelect.'
+      );
+    }
     await subj.selectOption({ label: subject }).catch(async () => {
       await subj.selectOption({ label: new RegExp(subject, 'i') });
     });
     await this.page.waitForTimeout(500); // subject may auto-fill a template
 
-    // Replace any auto-filled template with our exact text.
+    // 3) Write our exact text, replacing any auto-filled template.
     await area.click().catch(() => {});
+    await area.fill('');
     await area.fill(text);
 
-    if (audience === 'everyone') {
-      const everyone = await this.firstExisting(sel.chat.toEveryoneButton, { timeout: 1200 });
-      if (everyone) await everyone.click().catch(() => {});
+    // 4) Recipient. "To everyone" is selected by default, so only act when we need
+    //    administrators (clicking the already-active toggle could clear it).
+    if (audience === 'administrators') {
+      const admins = await this.firstExisting(sel.chat.toAdministratorsButton, { timeout: 1500 });
+      if (admins) await admins.click().catch(() => {});
     }
 
-    await send.click({ timeout: 5000 });
+    // 5) Send — the button enables once department + subject + text are all set.
+    const send = await this.firstExisting(sel.chat.sendButton, { timeout: 5000 });
+    if (!send) {
+      await this.screenshot('composer-send-not-found');
+      throw new Error('Send button not found — verify sel.chat.sendButton.');
+    }
+    await send.scrollIntoViewIfNeeded().catch(() => {});
+    await send.click({ timeout: 6000 }).catch(async () => {
+      await send.click({ timeout: 3000, force: true });
+    });
     await this.page.waitForTimeout(1500);
     return true;
   }
