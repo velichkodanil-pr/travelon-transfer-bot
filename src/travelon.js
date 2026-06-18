@@ -321,8 +321,8 @@ export class TravelonClient {
     return ALREADY_SENT_PATTERNS.some((re) => re.test(text));
   }
 
-  // Compose and send the message in the currently-open chat. Returns true on success.
-  async sendMessage() {
+  // Compose and send a message in the currently-open chat. Returns true on success.
+  async sendChatMessage({ department, subject, text, audience = 'everyone' }) {
     const dept = await this.firstExisting(sel.chat.departmentSelect);
     const subj = await this.firstExisting(sel.chat.subjectSelect);
     const area = await this.firstExisting(sel.chat.textArea);
@@ -334,27 +334,110 @@ export class TravelonClient {
     }
 
     // Native <select> elements: choose by visible label.
-    await dept.selectOption({ label: config.message.department }).catch(async () => {
-      await dept.selectOption({ label: new RegExp(config.message.department, 'i') });
+    await dept.selectOption({ label: department }).catch(async () => {
+      await dept.selectOption({ label: new RegExp(department, 'i') });
     });
     await this.page.waitForTimeout(300);
-    await subj.selectOption({ label: config.message.subject }).catch(async () => {
-      await subj.selectOption({ label: new RegExp(config.message.subject, 'i') });
+    await subj.selectOption({ label: subject }).catch(async () => {
+      await subj.selectOption({ label: new RegExp(subject, 'i') });
     });
     await this.page.waitForTimeout(500); // subject may auto-fill a template
 
     // Replace any auto-filled template with our exact text.
     await area.click().catch(() => {});
-    await area.fill(config.message.text);
+    await area.fill(text);
 
-    // Audience: ensure "To everyone" (so the agent sees it), unless overridden.
-    if (config.message.audience === 'everyone') {
+    if (audience === 'everyone') {
       const everyone = await this.firstExisting(sel.chat.toEveryoneButton, { timeout: 1200 });
       if (everyone) await everyone.click().catch(() => {});
     }
 
     await send.click({ timeout: 5000 });
     await this.page.waitForTimeout(1500);
+    return true;
+  }
+
+  // Generic transfer-phone message (existing 4-country workflow).
+  async sendMessage() {
+    return this.sendChatMessage({
+      department: config.message.department,
+      subject: config.message.subject,
+      text: config.message.text,
+      audience: config.message.audience,
+    });
+  }
+
+  // ---- Booking edit page: comment fields ----
+
+  editUrl(id) {
+    return `${config.baseUrl}/book/bundle/edit/${id}`;
+  }
+
+  async openEdit(id) {
+    await this.page.goto(this.editUrl(id), { waitUntil: 'domcontentloaded' });
+    await this.page.waitForTimeout(2500);
+  }
+
+  async readComments() {
+    const get = async (s) => {
+      const loc = this.page.locator(s).first();
+      if ((await loc.count().catch(() => 0)) === 0) return '';
+      return (await loc.inputValue().catch(() => '')) || '';
+    };
+    return { user: await get(sel.edit.commentUser), admin: await get(sel.edit.commentAdmin) };
+  }
+
+  // Append the phone string to BOTH comment fields (if absent), then save.
+  async appendPhonesToComments(phones, { dryRun }) {
+    const phoneStr = phones.join(' ');
+    const cur = await this.readComments();
+    const merge = (e) => (e && e.includes(phoneStr) ? e : e ? `${e} ${phoneStr}` : phoneStr);
+    const next = { user: merge(cur.user), admin: merge(cur.admin) };
+    if (dryRun) return { ...next, saved: false };
+    const fill = async (s, v) => {
+      const loc = this.page.locator(s).first();
+      if ((await loc.count().catch(() => 0)) > 0) await loc.fill(v).catch(() => {});
+    };
+    await fill(sel.edit.commentUser, next.user);
+    await fill(sel.edit.commentAdmin, next.admin);
+    const save = this.page
+      .locator(sel.edit.saveButton)
+      .filter({ hasText: /Save|Зберегти/i })
+      .first();
+    if ((await save.count().catch(() => 0)) > 0) await save.click().catch(() => {});
+    await this.page.waitForTimeout(1500);
+    return { ...next, saved: true };
+  }
+
+  // ---- List scanning / pagination (Bulgaria workflow) ----
+
+  async scanRows() {
+    return await this.page
+      .locator(sel.requests.resultRows)
+      .evaluateAll((trs) =>
+        trs.map((tr) => {
+          const text = (tr.innerText || '').replace(/\s+/g, ' ').trim();
+          const statusCell = Array.from(tr.querySelectorAll('td')).find((td) =>
+            /Room status/i.test(td.innerText)
+          );
+          const status = statusCell
+            ? statusCell.innerText.split(/Room status/i)[0].replace(/\s+/g, ' ').trim()
+            : null;
+          return { text, status };
+        })
+      )
+      .catch(() => []);
+  }
+
+  async goToNextPage() {
+    const next = this.page
+      .locator(
+        'a[rel="next"], li.next:not(.disabled) a, .pagination a:has-text("›"), .pagination a:has-text("»"), a:has-text("Next")'
+      )
+      .first();
+    if ((await next.count().catch(() => 0)) === 0) return false;
+    await next.click().catch(() => {});
+    await this.page.waitForTimeout(2000);
     return true;
   }
 }

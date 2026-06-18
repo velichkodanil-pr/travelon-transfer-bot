@@ -35,9 +35,10 @@ export const config = {
   maxSendsPerRun: num(process.env.MAX_SENDS_PER_RUN, 25),
 
   // --- matching ---
+  // Generic "transfer drivers" message countries. Болгарія is intentionally
+  // NOT here — Bulgaria is handled by the dedicated Eline workflow below.
   targetCountries: list(process.env.TARGET_COUNTRIES, [
     'Греція',
-    'Болгарія',
     'Албанія',
     'Хорватія',
     'Іспанія',
@@ -53,6 +54,33 @@ export const config = {
       process.env.MESSAGE_TEXT ||
       "Шановні колеги, просимо надіслати телефон туристів для зв'язку з трансферменами. Дякуємо.",
     audience: (process.env.MESSAGE_AUDIENCE || 'everyone').toLowerCase(), // everyone | administrators
+  },
+
+  // --- Bulgaria + Eline supplier workflow ---
+  bulgaria: {
+    enabled: bool(process.env.BG_ENABLED, true),
+    country: process.env.BG_COUNTRY || 'Болгарія',
+    statuses: list(process.env.BG_STATUSES, ['Confirmed', 'Confirmed Print']),
+    elineProviderName: process.env.BG_ELINE_PROVIDER || 'E.Line Tour',
+    // Only act on bookings created on/after this date (creation date).
+    createdFromISO: process.env.BG_CREATED_FROM || '2026-01-01',
+    // How many list pages to page through when scanning (safety cap).
+    maxListPages: num(process.env.BG_MAX_LIST_PAGES, 20),
+    department: process.env.BG_DEPARTMENT || 'Бронювання',
+    subject: process.env.BG_SUBJECT || 'Надання контактів водію автобуса',
+    askText:
+      process.env.BG_ASK_TEXT ||
+      'Шановні колеги, просимо надіслати номер телефону туристів для контакту з перевізниками. Дякуємо.',
+    reminderText:
+      process.env.BG_REMINDER_TEXT ||
+      'Шановні колеги, доброго дня! Нагадуємо, що потрібно надати контакти туристів для водія. Дякуємо.',
+  },
+  // Eline supplier portal (same software as TravelON). SEPARATE login.
+  eline: {
+    email: process.env.ELINE_EMAIL || '',
+    password: process.env.ELINE_PASSWORD || '',
+    baseUrl: (process.env.ELINE_BASE_URL || 'https://eline-tour.com.ua').replace(/\/$/, ''),
+    loginUrl: process.env.ELINE_LOGIN_URL || 'https://eline-tour.com.ua/admin/users/sign_in',
   },
 
   // --- browser ---
@@ -85,6 +113,15 @@ export const ALREADY_SENT_PATTERNS = [
   /надіслати\s+телефон/i,
   /телефон.*трансфер/i,
 ];
+
+// Ukrainian phone formats to recognise in comment fields / chat:
+//   380XXXXXXXXX (12), 80XXXXXXXXX (11), 0XXXXXXXXX (10).
+// Boundaries prevent matching inside a longer digit run.
+export const PHONE_RE = /(?<!\d)(?:380\d{9}|80\d{9}|0\d{9})(?!\d)/g;
+
+// Detect that WE already asked / reminded in a Bulgaria chat (dedup).
+export const BG_ASK_PATTERNS = [/перевізник/i, /контакт.*турист.*перевізник/i];
+export const BG_REMINDER_PATTERNS = [/нагадуємо.*контакт/i, /нагадуємо.*воді/i];
 
 // ----------------------------------------------------------------------------
 //  SELECTORS — the brittle part. These are best-effort guesses based on the
@@ -148,6 +185,23 @@ export const sel = {
     toEveryoneButton: 'button:has-text("To everyone"), :is(button,label):has-text("To everyone")',
     toAdministratorsButton: 'button:has-text("Send to administrators")',
     sendButton: 'button:has-text("Send")',
+  },
+
+  // TravelON booking edit page (/book/bundle/edit/{id}) — comment fields.
+  edit: {
+    commentUser: 'textarea[name="bundle[comment]"]', // "Comments for user"
+    commentAdmin: 'textarea[name="bundle[comment_admin]"]', // "Commentary for the administration"
+    saveButton: 'button[name="commit"]', // "Save"
+  },
+
+  // Eline supplier portal booking edit page — per-passenger phone inputs.
+  eline: {
+    loginEmail: ['input[type="email"]', 'input[name*="email" i]', 'input[name="user[email]"]'],
+    loginPassword: ['input[type="password"]', 'input[name="user[password]"]'],
+    loginSubmit: ['button[type="submit"]', 'input[type="submit"]'],
+    loggedInMarker: ['text=ЗАЯВКИ', 'text=Панель управління', 'text=Транспортал'],
+    passengerPhone: 'input[name="passenger[][telephone]"]',
+    saveButton: 'button[name="commit"]', // "Зберегти"
   },
 };
 

@@ -4,6 +4,7 @@ import { config } from './config.js';
 import { log } from './logger.js';
 import { wasSent, markSent } from './store.js';
 import { notify, notifyEnabled } from './notify.js';
+import { runBulgaria } from './bulgaria.js';
 
 export async function runCycle() {
   const startedAt = new Date();
@@ -16,6 +17,7 @@ export async function runCycle() {
     skippedStore: [], // we already messaged it on a previous run
     errors: [],
   };
+  let bg = null;
 
   const client = new TravelonClient();
   try {
@@ -72,6 +74,11 @@ export async function runCycle() {
         await client.screenshot(`booking-${b.id}-error`);
       }
     }
+
+    // Bulgaria + Eline workflow — reuses the same logged-in TravelON session.
+    if (config.bulgaria.enabled) {
+      bg = await runBulgaria(client);
+    }
   } catch (err) {
     summary.errors.push(`cycle: ${err.message}`);
     log.error('Cycle failed:', err.message);
@@ -91,9 +98,10 @@ export async function runCycle() {
     `Skipped (sent before): ${summary.skippedStore.join(', ') || '—'}`,
     `Errors: ${summary.errors.join(' | ') || '—'}`,
   ];
-  const report = lines.join('\n');
+  let report = lines.join('\n');
+  if (bg && bg.report) report += '\n\n' + bg.report;
   log.info('Cycle summary:\n' + report);
   if (notifyEnabled()) await notify(report);
 
-  return summary;
+  return { ...summary, bulgaria: bg };
 }

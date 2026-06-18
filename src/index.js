@@ -36,6 +36,11 @@ async function main() {
   log.info(` countries : ${config.targetCountries.join(', ')}`);
   log.info(` statuses  : ${config.targetStatuses.join(', ')}`);
   log.info(` onlyToday : ${config.onlyToday}`);
+  log.info(
+    ` bulgaria  : ${config.bulgaria.enabled ? 'ON' : 'off'} (Eline creds ${
+      config.eline.email && config.eline.password ? 'set' : 'MISSING'
+    })`
+  );
   log.info('============================================================');
 
   // Run immediately on boot.

@@ -40,3 +40,34 @@ export async function wasSent(bookingId) {
   const sent = await loadSent();
   return sent.has(String(bookingId));
 }
+
+// --- Bulgaria/Eline per-booking watch state -------------------------------
+// Stored in data/bulgaria.json: { [bookingId]: { askedAt, remindedAt, doneAt, ... } }
+// Persist across restarts by attaching a Railway Volume at DATA_DIR (optional;
+// the in-chat scan still prevents duplicate asks if the file is lost).
+const WATCH_FILE = path.join(config.dataDir, 'bulgaria.json');
+
+export async function loadWatch() {
+  try {
+    return JSON.parse(await fs.readFile(WATCH_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+export async function getWatch(bookingId) {
+  const w = await loadWatch();
+  return w[String(bookingId)] || null;
+}
+
+export async function setWatch(bookingId, patch) {
+  try {
+    await ensureDir();
+    const w = await loadWatch();
+    const key = String(bookingId);
+    w[key] = { ...(w[key] || {}), ...patch };
+    await fs.writeFile(WATCH_FILE, JSON.stringify(w, null, 2), 'utf8');
+  } catch (err) {
+    log.warn('Could not persist watch-store (continuing):', err.message);
+  }
+}
