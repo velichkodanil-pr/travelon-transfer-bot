@@ -91,13 +91,13 @@ export async function runBulgaria(travelon) {
   if (!config.bulgaria.enabled) return summary;
 
   // 1) Scan the list for Bulgaria + Eline + Confirmed candidates created >= cutoff.
-  await travelon.openRequests();
-  await travelon.clearCheckInDates().catch(() => {});
-  await travelon.applyFilter().catch(() => {});
-
+  // Page via direct ?page=N URLs (reliable, unlike clicking a flaky "Next" link).
   const candidates = [];
   const seen = new Set();
-  for (let page = 0; page < config.bulgaria.maxListPages; page++) {
+  for (let page = 1; page <= config.bulgaria.maxListPages; page++) {
+    const url = page > 1 ? `${config.requestsUrl}?page=${page}` : config.requestsUrl;
+    await travelon.page.goto(url, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    await travelon.page.waitForTimeout(2500);
     const rows = await travelon.scanRows();
     if (!rows.length) break;
     for (const r of rows) {
@@ -116,7 +116,6 @@ export async function runBulgaria(travelon) {
       .filter(Boolean);
     const oldest = isoDates.length ? isoDates[isoDates.length - 1] : null;
     if (oldest && oldest < config.bulgaria.createdFromISO) break;
-    if (!(await travelon.goToNextPage())) break;
   }
   summary.matched = candidates.map((c) => `${c.id}/#${c.elineNum}`);
   log.info(`[BG] Candidates: ${summary.matched.join(', ') || DASH}`);

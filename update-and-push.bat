@@ -8,7 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 git add .
-git commit -m "Update travelon-transfer-bot (fix status filter; correct login URL)"
+git commit -m "Bulgaria: reliable list pagination via ?page=N URLs"
 git push
 
 echo.
