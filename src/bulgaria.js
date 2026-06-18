@@ -8,17 +8,14 @@
 //   4. if nowhere -> ask the agent; next day at 12:00 (Kyiv) send ONE reminder;
 //      keep re-checking until the phone arrives, then act and stop.
 // DRY_RUN: detects + logs intended actions, writes/sends nothing.
-import {
-  config,
-  BG_ASK_PATTERNS,
-  BG_REMINDER_PATTERNS,
-} from './config.js';
+import { config, BG_ASK_PATTERNS, BG_REMINDER_PATTERNS } from './config.js';
 import { log } from './logger.js';
-import { extractPhones } from './phone.js';
+import { extractPhones, extractTouristPhones } from './phone.js';
 import { ElineClient } from './eline.js';
 import { getWatch, setWatch } from './store.js';
 
 const ELINE_REF_RE = /E\.?\s*Line\s*Tour\s*-\s*(\d+)/i;
+const DASH = '-';
 
 function ddmmyyyyToISO(d) {
   const m = d && d.match(/(\d{2})\.(\d{2})\.(\d{4})/);
@@ -63,7 +60,7 @@ function parseBulgariaRow(row) {
 
 async function writeToEline(booking, phones, summary, ensureEline) {
   if (!config.eline.email || !config.eline.password) {
-    summary.errors.push(`${booking.id}: ELINE creds missing — portal step skipped`);
+    summary.errors.push(`${booking.id}: ELINE creds missing, portal step skipped`);
     log.warn(`[BG] ${booking.id}: Eline creds not set; cannot write portal #${booking.elineNum}.`);
     return;
   }
@@ -74,15 +71,17 @@ async function writeToEline(booking, phones, summary, ensureEline) {
   log.info(
     `[BG] ${booking.id} Eline#${booking.elineNum}: ${verb} ${res.count} phone field(s) -> [${res.plan.join(', ')}]`
   );
-  summary.eline.push(`${booking.id}->#${booking.elineNum}[${res.plan.join(',')}]${res.wrote ? '' : ' (dry)'}`);
+  summary.eline.push(
+    `${booking.id}->#${booking.elineNum}[${res.plan.join(',')}]${res.wrote ? '' : ' (dry)'}`
+  );
 }
 
 export async function runBulgaria(travelon) {
   const summary = {
     dryRun: config.dryRun,
     matched: [],
-    eline: [], // wrote/would-write to Eline
-    comments: [], // wrote/would-write phone into TravelON comments
+    eline: [],
+    comments: [],
     asked: [],
     reminded: [],
     waiting: [],
@@ -120,7 +119,7 @@ export async function runBulgaria(travelon) {
     if (!(await travelon.goToNextPage())) break;
   }
   summary.matched = candidates.map((c) => `${c.id}/#${c.elineNum}`);
-  log.info(`[BG] Candidates: ${summary.matched.join(', ') || '—'}`);
+  log.info(`[BG] Candidates: ${summary.matched.join(', ') || DASH}`);
 
   // 2) Process each candidate.
   let eline = null;
@@ -132,12 +131,18 @@ export async function runBulgaria(travelon) {
     }
     return eline;
   };
+  // Only persist watch state in LIVE mode (so DRY-RUN never pre-marks anything).
+  const persist = async (id, patch) => {
+    if (!config.dryRun) await setWatch(id, patch);
+  };
 
   try {
     for (const c of candidates) {
       try {
         const w = await getWatch(c.id);
-        if (w?.doneAt) {
+        // In LIVE mode skip bookings we've already completed. In DRY-RUN ignore
+        // the store entirely (re-evaluate every cycle, persist nothing).
+        if (w?.doneAt && !config.dryRun) {
           summary.skippedDone.push(c.id);
           continue;
         }
@@ -148,14 +153,14 @@ export async function runBulgaria(travelon) {
         let phones = extractPhones(`${comments.user} ${comments.admin}`);
         if (phones.length) {
           await writeToEline(c, phones, summary, ensureEline);
-          await setWatch(c.id, { doneAt: new Date().toISOString(), phones, source: 'comments' });
+          await persist(c.id, { doneAt: new Date().toISOString(), phones, source: 'comments' });
           continue;
         }
 
         // (b) phone in the chat (agent reply)?
         await travelon.openChat(c.id);
         const chatText = await travelon.readChatText();
-        phones = extractPhones(chatText);
+        phones = extractTouristPhones(chatText);
         if (phones.length) {
           await travelon.closeChat(c.id).catch(() => {});
           await travelon.openEdit(c.id);
@@ -167,7 +172,7 @@ export async function runBulgaria(travelon) {
             )}] to both comment fields`
           );
           await writeToEline(c, phones, summary, ensureEline);
-          await setWatch(c.id, { doneAt: new Date().toISOString(), phones, source: 'chat' });
+          await persist(c.id, { doneAt: new Date().toISOString(), phones, source: 'chat' });
           continue;
         }
 
@@ -189,7 +194,7 @@ export async function runBulgaria(travelon) {
             summary.asked.push(c.id);
             log.info(`[BG] ${c.id}: asked agent for tourist phone.`);
           }
-          await setWatch(c.id, { askedAt: new Date().toISOString() });
+          await persist(c.id, { askedAt: new Date().toISOString() });
         } else if (!reminded && shouldRemindNow(w?.askedAt)) {
           if (config.dryRun) {
             summary.reminded.push(`${c.id} (dry)`);
@@ -203,7 +208,7 @@ export async function runBulgaria(travelon) {
             summary.reminded.push(c.id);
             log.info(`[BG] ${c.id}: sent reminder.`);
           }
-          await setWatch(c.id, { remindedAt: new Date().toISOString() });
+          await persist(c.id, { remindedAt: new Date().toISOString() });
         } else {
           summary.waiting.push(c.id);
         }
@@ -220,14 +225,14 @@ export async function runBulgaria(travelon) {
 
   const lines = [
     `Bulgaria/Eline ${config.dryRun ? '[DRY-RUN]' : '[LIVE]'}`,
-    `Matched: ${summary.matched.length} (${summary.matched.join(', ') || '—'})`,
-    `Eline writes: ${summary.eline.join(', ') || '—'}`,
-    `Comment writes: ${summary.comments.join(', ') || '—'}`,
-    `Asked: ${summary.asked.join(', ') || '—'}`,
-    `Reminded: ${summary.reminded.join(', ') || '—'}`,
-    `Waiting: ${summary.waiting.join(', ') || '—'}`,
-    `Already done: ${summary.skippedDone.join(', ') || '—'}`,
-    `Errors: ${summary.errors.join(' | ') || '—'}`,
+    `Matched: ${summary.matched.length} (${summary.matched.join(', ') || DASH})`,
+    `Eline writes: ${summary.eline.join(', ') || DASH}`,
+    `Comment writes: ${summary.comments.join(', ') || DASH}`,
+    `Asked: ${summary.asked.join(', ') || DASH}`,
+    `Reminded: ${summary.reminded.join(', ') || DASH}`,
+    `Waiting: ${summary.waiting.join(', ') || DASH}`,
+    `Already done: ${summary.skippedDone.join(', ') || DASH}`,
+    `Errors: ${summary.errors.join(' | ') || DASH}`,
   ];
   log.info('[BG] summary:\n' + lines.join('\n'));
   summary.report = lines.join('\n');
