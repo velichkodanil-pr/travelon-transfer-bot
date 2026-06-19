@@ -11,7 +11,8 @@
     "start": "node src/index.js",
     "once": "RUN_ONCE=true node src/index.js",
     "codegen": "playwright codegen https://travelon.to",
-    "check": "for f in src/*.js; do node --check \"$f\" || exit 1; done"
+    "check": "for f in src/*.js; do node --check \"$f\" || exit 1; done",
+    "test": "node --test"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
