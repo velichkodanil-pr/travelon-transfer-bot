@@ -65,12 +65,14 @@ export const config = {
     // Transfer suppliers handled for Bulgaria. We filter the TravelON list by the
     // supplier (partner_id) so the BOOKING date is irrelevant — what matters is the
     // CHECK-IN date (see runBulgaria). `writeToEline`: also push the phone into the
-    // Eline supplier portal (true only for E.Line Tour; Itravel has no portal).
+    // Eline supplier portal (true only for E.Line Tour). `messageItravel`: send the
+    // phone into the Itravel client cabinet booking thread (true only for Itravel).
     suppliers: [
       {
         name: process.env.BG_ITRAVEL_PROVIDER || 'Itravel',
         partnerId: process.env.BG_ITRAVEL_PARTNER_ID || '6572',
         writeToEline: false,
+        messageItravel: true,
       },
       {
         name: process.env.BG_ELINE_PROVIDER || 'E.Line Tour',
@@ -104,6 +106,21 @@ export const config = {
     baseUrl: (process.env.ELINE_BASE_URL || 'https://eline-tour.com.ua').replace(/\/$/, ''),
     loginUrl: process.env.ELINE_LOGIN_URL || 'https://eline-tour.com.ua/admin/users/sign_in',
   },
+  // Itravel supplier CLIENT CABINET (i-travel.com.ua, WordPress). SEPARATE login.
+  // The bot opens /client-profile/?id=<orderNo>, clicks the order's "Повідомлення"
+  // link and sends the tourist phone into the booking thread. orderNo = the
+  // "Itravel - NNNN" supplier reference captured from the TravelON list.
+  itravel: {
+    enabled: bool(process.env.BG_ITRAVEL_MESSAGE_ENABLED, true),
+    email: process.env.ITRAVEL_EMAIL || '',
+    password: process.env.ITRAVEL_PASSWORD || '',
+    baseUrl: (process.env.ITRAVEL_BASE_URL || 'https://www.i-travel.com.ua').replace(/\/$/, ''),
+    loginUrl: process.env.ITRAVEL_LOGIN_URL || 'https://www.i-travel.com.ua/client-profile/',
+    profilePath: process.env.ITRAVEL_PROFILE_PATH || '/client-profile/',
+    // {phones} is replaced with the comma-separated canonical numbers.
+    messageText:
+      process.env.ITRAVEL_MESSAGE_TEXT || 'Контакт туриста для водія трансферу: {phones}',
+  },
 
   // --- browser ---
   headless: bool(process.env.HEADLESS, true),
@@ -121,13 +138,10 @@ export const config = {
   },
 
   // --- google sheets report (optional) ---
-  // Веде трекер заявок у Google Таблиці. Вмикається лише коли REPORT_ENABLED=true
-  // і задані OAuth-креди. Авторизація — OAuth user-token (діє від акаунта,
-  // що володіє таблицею). Деталі — у src/report.js.
   report: {
     enabled: bool(process.env.REPORT_ENABLED, false),
     spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID || '',
-    sheetName: process.env.GOOGLE_SHEETS_TAB || '', // порожньо = перша вкладка
+    sheetName: process.env.GOOGLE_SHEETS_TAB || '',
     clientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
     clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET || '',
     refreshToken: process.env.GOOGLE_OAUTH_REFRESH_TOKEN || '',
@@ -138,13 +152,12 @@ export const config = {
 
 // Phrases that mean "a transfer / driver phone request was already sent in this
 // chat" — used to avoid sending a duplicate. Case-insensitive, accent-tolerant.
-// Add more variants here if agents/operators phrase it differently.
 export const ALREADY_SENT_PATTERNS = [
-  /телефон\s+турист/i, // "телефон туристів ..."
-  /тел\.?\s+турист/i, // "тел туристів для трансферу"
-  /контакт\w*\s+турист/i, // "контакти туристів для водія"
-  /трансфермен/i, // "...для зв'язку з трансферменами"
-  /контакт\w*\s+воді/i, // "надання контактів водію"
+  /телефон\s+турист/i,
+  /тел\.?\s+турист/i,
+  /контакт\w*\s+турист/i,
+  /трансфермен/i,
+  /контакт\w*\s+воді/i,
   /надіслати\s+телефон/i,
   /телефон.*трансфер/i,
 ];
@@ -163,21 +176,18 @@ export const PHONE_RE = /(?<!\d)(?:380\d{9}|80\d{9}|0\d{9})(?!\d)/g;
 // leading "+") — it deliberately EXCLUDES commas, slashes, colons, letters and
 // newlines, so it never fuses list items ("місця 1,2"), dates ("04/24/2026"),
 // times ("10:59"), route/seat codes ("ТК2139") or two numbers on separate lines.
-export const PHONE_CANDIDATE_RE = /\+?\d[\d \t.() -]{6,20}\d/g;
+export const PHONE_CANDIDATE_RE = /\+?\d[\d \t.() -]{6,20}\d/g;
 
 // Detect that WE already asked / reminded in a Bulgaria chat (dedup).
 export const BG_ASK_PATTERNS = [/перевізник/i, /контакт.*турист.*перевізник/i];
 export const BG_REMINDER_PATTERNS = [/нагадуємо.*контакт/i, /нагадуємо.*воді/i];
 
 // ----------------------------------------------------------------------------
-// SELECTORS — the brittle part. These are best-effort guesses based on the
-// observed UI (English field labels, Ukrainian/Russian content). Verify and
-// fix them against the live DOM with: npm run codegen (see README).
-// Prefer text/role/label locators over fragile CSS where possible.
+// SELECTORS — the brittle part. Best-effort guesses based on the observed UI.
+// Verify/fix against the live DOM with: npm run codegen (see README).
 // ----------------------------------------------------------------------------
 export const sel = {
   login: {
-    // Try several common input shapes; the client picks the first that exists.
     email: [
       'input[type="email"]',
       'input[name*="email" i]',
@@ -193,49 +203,28 @@ export const sel = {
       'button:has-text("Увійти")',
       'button:has-text("Вход")',
     ],
-    // An element that is only present AFTER a successful login (used to confirm).
     loggedInMarker: ['text=REQUESTS', 'text=Partners and users', 'text=Транспортал'],
   },
 
   requests: {
-    // The red "Filter" (apply) button in the toolbar.
     filterApplyButton: 'button:has-text("Filter"), a:has-text("Filter")',
-
-    // Status multiselect (the field showing e.g. "Confirmed, Confirmed Print").
     statusField:
       '#bundle-status, [data-filter="status"], .filter-status, label:has-text("Status") ~ * .multiselect, text=/^(In Work|Confirmed)/',
-    // A checkbox option inside the open Status dropdown, located by its label text.
     statusOptionByLabel: (label) =>
       `:is(.dropdown, .multiselect, .filter) :is(label,li,div):has-text("${label}")`,
-
-    // Two "Interval of check in" date inputs (must be cleared so they don't filter).
     checkInInputs:
       'label:has-text("Interval of check in") ~ * input, [name*="checkin" i], [name*="check_in" i]',
-
-    // Each result row. We then parse innerText for id/date/country in JS.
     resultRows: 'table tbody tr, .grid-view tbody tr, .items tbody tr',
-
-    // Within a row: the link that opens the chat modal (emits 'modal:chatbox:open').
     chatIconInRow: 'a[onclick*="chatbox:open"]',
   },
 
   chat: {
-    // The open chat drawer renders inside a `.tailwind-scope` root as a fixed
-    // right-hand panel (NOT a `.modal-v2`). It contains the "Compose…" textarea.
     panel: [
       'div.fixed.top-0.right-0:has(textarea)',
       '.tailwind-scope:has(textarea[placeholder*="Compose" i])',
       '.fixed.right-0.shadow-2xl',
     ],
-    // All rendered message bubbles' text inside the panel.
     messages: '.message, .chat-message, [class*="message" i]',
-    // Composer fields. The drawer's <select>s have NO name/id. Anchor on the
-    // visible English labels; the real structure is:
-    //   <div class="flex flex-col gap-1"><label>DEPARTMENT</label>
-    //     <div class="relative"><select>…</select></div></div>
-    // Fallback: positional <select> inside the drawer. Do NOT use
-    // option:text-is(...) — option text inside a closed <select> is not "visible"
-    // to Playwright's text engine, so it never matched (the old broken fallback).
     departmentSelect: [
       'div.flex.flex-col:has(> label:has-text("Department")) select',
       'div.fixed.top-0.right-0 select >> nth=0',
@@ -248,8 +237,6 @@ export const sel = {
     toEveryoneButton: ['button:has-text("To everyone")', ':is(button,label):has-text("To everyone")'],
     toAdministratorsButton: ['button:has-text("Send to administrators")'],
     sendButton: ['button:text-is("Send")', 'button:has-text("Send")'],
-    // Close the chat drawer (do NOT re-click the row icon — that re-opens it).
-    // closeChat() falls back to Escape if none of these match.
     closeButton: [
       'div.fixed.top-0.right-0 button[aria-label*="close" i]',
       'button[aria-label*="close" i]',
@@ -271,6 +258,35 @@ export const sel = {
     loggedInMarker: ['text=ЗАЯВКИ', 'text=Панель управління', 'text=Транспортал'],
     passengerPhone: 'input[name="passenger[][telephone]"]',
     saveButton: 'button[name="commit"]', // "Зберегти"
+  },
+
+  // Itravel CLIENT cabinet (i-travel.com.ua). Order search is via URL ?id=<orderNo>;
+  // the per-order "Повідомлення" link calls openChat(order, token, date) — we click
+  // it so the page supplies the token. Login selectors are best-effort (WordPress) —
+  // verify with codegen against the login page and set ITRAVEL_LOGIN_URL if different.
+  itravel: {
+    loginEmail: [
+      'input[type="email"]',
+      'input[name*="email" i]',
+      'input[name*="login" i]',
+      'input[name="log"]',
+      '#user_login',
+    ],
+    loginPassword: ['input[type="password"]', 'input[name*="pass" i]', 'input[name="pwd"]', '#user_pass'],
+    loginSubmit: [
+      'button[type="submit"]',
+      'input[type="submit"]',
+      '#wp-submit',
+      'button:has-text("Увійти")',
+      'button:has-text("Вхід")',
+    ],
+    loggedInMarker: ['text=Особистий кабінет', 'a:has-text("Вихід")', 'text=Замовлення'],
+    messageButton: 'a[onclick^="openChat("]',
+    chatPopup: '#chatPopup',
+    chatMessages: '#chatMessages',
+    chatInput: '#chatInput',
+    sendButton: '#chatPopup button[onclick="sendMessage()"]',
+    closeButton: '#chatPopup a.close, a.cmsmasters_button.close',
   },
 };
 

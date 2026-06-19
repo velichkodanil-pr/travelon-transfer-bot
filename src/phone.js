@@ -68,3 +68,18 @@ export function extractTouristPhones(text) {
   }
   return out;
 }
+
+// --- Supplier-message helpers (Itravel cabinet) -------------------------------
+
+// Return the phones NOT already present in `text` (compared by canonical form,
+// so any written format counts). Used to avoid posting the same number twice.
+export function phonesMissingFromText(phones, text) {
+  const present = new Set(extractPhones(text || ''));
+  return (phones || []).filter((p) => !present.has(p));
+}
+
+// Build a supplier message from a template, replacing `{phones}` with the
+// comma-separated numbers.
+export function buildPhoneMessage(template, phones) {
+  return String(template).replace('{phones}', (phones || []).join(', '));
+}

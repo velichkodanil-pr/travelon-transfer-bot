@@ -1,10 +1,11 @@
-// Bulgaria + Eline workflow.
-// For Confirmed/Confirmed Print Bulgaria bookings (created >= configured date)
-// whose Transport provider is "E.Line Tour":
+// Bulgaria + Eline + Itravel workflow.
+// For Confirmed/Confirmed Print Bulgaria bookings (check-in tomorrow+) of the
+// configured transfer suppliers:
 // 1. read the tourist phone from the two comment fields;
 // 2. else from the booking chat (agent reply);
-// 3. if found -> write it into BOTH comment fields (when taken from chat) and
-//    into the Eline portal (one phone per passenger);
+// 3. if found -> write it into BOTH comment fields (when taken from chat);
+//    for E.Line -> also into the Eline portal; for Itravel -> also send it into
+//    the Itravel client-cabinet booking thread (one message, deduped);
 // 4. if nowhere -> ask the agent; next day at 12:00 (Kyiv) send ONE reminder;
 //    keep re-checking until the phone arrives, then act and stop.
 // DRY_RUN: detects + logs intended actions, writes/sends nothing.
@@ -12,6 +13,7 @@ import { config, BG_ASK_PATTERNS, BG_REMINDER_PATTERNS } from './config.js';
 import { log } from './logger.js';
 import { extractPhones } from './phone.js';
 import { ElineClient } from './eline.js';
+import { ItravelClient } from './itravel.js';
 import { getWatch, setWatch } from './store.js';
 
 const ELINE_REF_RE = /E\.?\s*Line\s*Tour\s*-\s*(\d+)/i;
@@ -85,6 +87,7 @@ function parseBulgariaRow(row, supplier, checkinFrom) {
     id: idM[1],
     supplier: supplier.name,
     writeToEline: supplier.writeToEline,
+    messageItravel: supplier.messageItravel || false,
     elineNum,
     supplierRef,
     status: row.status,
@@ -116,6 +119,7 @@ export async function runBulgaria(travelon) {
     dryRun: config.dryRun,
     matched: [],
     eline: [],
+    itravel: [],
     comments: [],
     asked: [],
     reminded: [],
@@ -144,10 +148,9 @@ export async function runBulgaria(travelon) {
   });
   const dryTag = config.dryRun ? 'DRY-RUN' : '';
 
-  // 1) Scan per transfer supplier. For each, filter the TravelON list by supplier
-  // (partner_id) + status server-side and CLEAR all date filters, then page the
-  // (small) result set keeping Bulgaria bookings whose CHECK-IN is tomorrow or
-  // later. Booking/creation date is intentionally NOT filtered.
+  // 1) Scan per transfer supplier (filter the TravelON list by partner_id + status
+  // server-side, clear date filters, page the result keeping Bulgaria bookings whose
+  // CHECK-IN is tomorrow or later).
   const checkinFrom = checkinCutoffISO(config.tz, config.bulgaria.checkinFromDays);
   log.info(`[BG] check-in cutoff (>= ${checkinFrom}); booking date: any`);
   const candidates = [];
@@ -207,9 +210,46 @@ export async function runBulgaria(travelon) {
     }
     return eline;
   };
+  let itravel = null;
+  const ensureItravel = async () => {
+    if (!itravel) {
+      itravel = new ItravelClient();
+      await itravel.init();
+      await itravel.login();
+    }
+    return itravel;
+  };
   // Only persist watch state in LIVE mode (so DRY-RUN never pre-marks anything).
   const persist = async (id, patch) => {
     if (!config.dryRun) await setWatch(id, patch);
+  };
+  // Send the tourist phone(s) into the Itravel cabinet booking thread (dedup via the
+  // thread itself + the watch store). Returns true once the booking is considered
+  // messaged (sent now, or the number was already in the thread). Logs to summary.
+  const messageItravelFor = async (c, phones, w) => {
+    if (!config.itravel.enabled || !c.messageItravel || !phones?.length) return false;
+    if (w?.itravelMsgAt) return true; // already messaged in a previous cycle
+    if (!config.itravel.email || !config.itravel.password) {
+      log.warn(`[Itravel] ${c.id}: ITRAVEL creds not set; cabinet message skipped.`);
+      return false;
+    }
+    if (!c.supplierRef) {
+      summary.errors.push(`${c.id}: no Itravel order ref; cabinet message skipped`);
+      return false;
+    }
+    const client = await ensureItravel();
+    const res = await client.sendPhones(c.supplierRef, phones, { dryRun: config.dryRun });
+    if (res.alreadyPresent) {
+      log.info(`[Itravel] ${c.id} (order ${c.supplierRef}): phone already in thread.`);
+      summary.itravel.push(`${c.id}=present`);
+      return true;
+    }
+    const verb = config.dryRun ? 'WOULD message' : 'messaged';
+    log.info(`[Itravel] ${c.id} (order ${c.supplierRef}): ${verb} [${res.missing.join(', ')}]`);
+    summary.itravel.push(
+      `${c.id}->order${c.supplierRef}[${res.missing.join(',')}]${res.sent ? '' : ' (dry)'}`
+    );
+    return res.sent; // dry-run -> not yet messaged
   };
 
   try {
@@ -219,6 +259,18 @@ export async function runBulgaria(travelon) {
         // In LIVE mode skip bookings we've already completed. In DRY-RUN ignore
         // the store entirely (re-evaluate every cycle, persist nothing).
         if (w?.doneAt && !config.dryRun) {
+          // Backfill: this booking was completed before the Itravel-cabinet step
+          // existed (or messaging failed earlier) — message the supplier now.
+          if (c.messageItravel && !w?.itravelMsgAt && w?.phones?.length) {
+            try {
+              if (await messageItravelFor(c, w.phones, w)) {
+                await persist(c.id, { itravelMsgAt: new Date().toISOString() });
+              }
+            } catch (err) {
+              summary.errors.push(`${c.id}: Itravel message failed: ${err.message}`);
+              log.error(`[Itravel] ${c.id} message failed:`, err.message);
+            }
+          }
           summary.skippedDone.push(c.id);
           summary.rows.push(
             mkRow(c, {
@@ -239,7 +291,21 @@ export async function runBulgaria(travelon) {
         let phones = extractPhones(`${comments.user} ${comments.admin}`);
         if (phones.length) {
           if (c.writeToEline) await writeToEline(c, phones, summary, ensureEline);
-          await persist(c.id, { doneAt: new Date().toISOString(), phones, source: 'comments' });
+          let itravelMsgAt = null;
+          if (c.messageItravel) {
+            try {
+              if (await messageItravelFor(c, phones, w)) itravelMsgAt = new Date().toISOString();
+            } catch (err) {
+              summary.errors.push(`${c.id}: Itravel message failed: ${err.message}`);
+              log.error(`[Itravel] ${c.id} message failed:`, err.message);
+            }
+          }
+          await persist(c.id, {
+            doneAt: new Date().toISOString(),
+            phones,
+            source: 'comments',
+            ...(itravelMsgAt ? { itravelMsgAt } : {}),
+          });
           summary.rows.push(
             mkRow(c, {
               phonePresent: 'так',
@@ -260,8 +326,7 @@ export async function runBulgaria(travelon) {
         }
 
         // (b) phone in the chat? Any number written by the agent in the chat panel
-        // counts as the tourist's (per operator guidance — other numbers are not
-        // posted there). Read the PANEL only, never the whole page.
+        // counts as the tourist's (per operator guidance). Read the PANEL only.
         await travelon.openChat(c.id);
         const chatText = await travelon.readChatPanelText();
         phones = extractPhones(chatText);
@@ -276,7 +341,21 @@ export async function runBulgaria(travelon) {
             )}] to both comment fields`
           );
           if (c.writeToEline) await writeToEline(c, phones, summary, ensureEline);
-          await persist(c.id, { doneAt: new Date().toISOString(), phones, source: 'chat' });
+          let itravelMsgAt = null;
+          if (c.messageItravel) {
+            try {
+              if (await messageItravelFor(c, phones, w)) itravelMsgAt = new Date().toISOString();
+            } catch (err) {
+              summary.errors.push(`${c.id}: Itravel message failed: ${err.message}`);
+              log.error(`[Itravel] ${c.id} message failed:`, err.message);
+            }
+          }
+          await persist(c.id, {
+            doneAt: new Date().toISOString(),
+            phones,
+            source: 'chat',
+            ...(itravelMsgAt ? { itravelMsgAt } : {}),
+          });
           summary.rows.push(
             mkRow(c, {
               phonePresent: 'так',
@@ -364,12 +443,14 @@ export async function runBulgaria(travelon) {
     }
   } finally {
     await eline?.close();
+    await itravel?.close();
   }
 
   const lines = [
     `Bulgaria/Eline ${config.dryRun ? '[DRY-RUN]' : '[LIVE]'}`,
     `Matched: ${summary.matched.length} (${summary.matched.join(', ') || DASH})`,
     `Eline writes: ${summary.eline.join(', ') || DASH}`,
+    `Itravel msgs: ${summary.itravel.join(', ') || DASH}`,
     `Comment writes: ${summary.comments.join(', ') || DASH}`,
     `Asked: ${summary.asked.join(', ') || DASH}`,
     `Reminded: ${summary.reminded.join(', ') || DASH}`,
