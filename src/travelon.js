@@ -483,36 +483,43 @@ export class TravelonClient {
   async applyBulgariaSupplierFilter(partnerId, statusIds) {
     await this.page.goto(config.requestsUrl, { waitUntil: 'domcontentloaded' });
     await this.page.waitForTimeout(1500);
-    await this.page.evaluate(
-      ({ partnerId, statusIds }) => {
-        const form =
-          document.querySelector('form[action="/book/bundle/index"]') ||
-          document.querySelector('form');
-        if (!form) return;
-        const partner = form.querySelector('select[name="filter[partner_id]"]');
-        if (partner) partner.value = partnerId;
-        const st = form.querySelector('select[name="filter[status_ids][]"]');
-        if (st) Array.from(st.options).forEach((o) => (o.selected = statusIds.includes(o.value)));
-        const mkt = form.querySelector('select[name="filter[market_state_ids][]"]');
-        if (mkt) Array.from(mkt.options).forEach((o) => (o.selected = false));
-        const sv = form.querySelector('[name="filter[search]"]');
-        if (sv) sv.value = '';
-        [
-          'filter[from_order]',
-          'filter[to_order]',
-          'filter[from_entry]',
-          'filter[to_entry]',
-          'filter[from_exit]',
-          'filter[to_exit]',
-        ].forEach((n) => {
-          const el = form.querySelector(`[name="${n}"]`);
-          if (el) el.value = '';
-        });
-        form.submit();
-      },
-      { partnerId, statusIds }
-    );
-    await this.page.waitForLoadState('domcontentloaded').catch(() => {});
+    // Submit the POST filter form and WAIT for the resulting navigation, so the
+    // next scanRows() reads the FILTERED list (not the pre-submit page).
+    await Promise.all([
+      this.page
+        .waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 })
+        .catch(() => {}),
+      this.page.evaluate(
+        ({ partnerId, statusIds }) => {
+          const form =
+            document.querySelector('form[action="/book/bundle/index"]') ||
+            document.querySelector('form');
+          if (!form) return;
+          const partner = form.querySelector('select[name="filter[partner_id]"]');
+          if (partner) partner.value = partnerId;
+          const st = form.querySelector('select[name="filter[status_ids][]"]');
+          if (st)
+            Array.from(st.options).forEach((o) => (o.selected = statusIds.includes(o.value)));
+          const mkt = form.querySelector('select[name="filter[market_state_ids][]"]');
+          if (mkt) Array.from(mkt.options).forEach((o) => (o.selected = false));
+          const sv = form.querySelector('[name="filter[search]"]');
+          if (sv) sv.value = '';
+          [
+            'filter[from_order]',
+            'filter[to_order]',
+            'filter[from_entry]',
+            'filter[to_entry]',
+            'filter[from_exit]',
+            'filter[to_exit]',
+          ].forEach((n) => {
+            const el = form.querySelector(`[name="${n}"]`);
+            if (el) el.value = '';
+          });
+          form.submit();
+        },
+        { partnerId, statusIds }
+      ),
+    ]);
     await this.page.waitForTimeout(2500);
   }
 

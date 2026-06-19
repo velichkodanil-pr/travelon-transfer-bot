@@ -155,6 +155,7 @@ export async function runBulgaria(travelon) {
   for (const supplier of config.bulgaria.suppliers) {
     await travelon.applyBulgariaSupplierFilter(supplier.partnerId, config.bulgaria.statusIds);
     let prevFirstId = null;
+    let supCount = 0;
     for (let page = 1; page <= config.bulgaria.maxListPages; page++) {
       if (page > 1) {
         await travelon.page
@@ -164,6 +165,19 @@ export async function runBulgaria(travelon) {
       }
       const rows = await travelon.scanRows();
       const ids = rows.map((r) => (r.text.match(/\b(\d{5})\b/) || [])[1]).filter(Boolean);
+      if (page === 1) {
+        const bgRows = rows.filter((r) =>
+          new RegExp(config.bulgaria.country, 'i').test(r.text || '')
+        );
+        const sample = bgRows
+          .slice(0, 4)
+          .map((r) => `${(r.text.match(/\b(\d{5})\b/) || [])[1]}:${r.checkin || '?'}`);
+        log.info(
+          `[BG] ${supplier.name}: page1 idRows=${ids.length}, bulgaria=${bgRows.length} [${sample.join(
+            ', '
+          )}]`
+        );
+      }
       if (!ids.length) break;
       if (prevFirstId && ids[0] === prevFirstId) break; // same page repeated -> end
       prevFirstId = ids[0];
@@ -172,9 +186,11 @@ export async function runBulgaria(travelon) {
         if (c && !seen.has(c.id)) {
           seen.add(c.id);
           candidates.push(c);
+          supCount += 1;
         }
       }
     }
+    log.info(`[BG] ${supplier.name}: ${supCount} candidate(s)`);
   }
   summary.matched = candidates.map(
     (c) => `${c.id}/${c.supplier}${c.elineNum ? `#${c.elineNum}` : ''}`
