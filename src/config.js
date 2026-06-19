@@ -62,9 +62,31 @@ export const config = {
     country: process.env.BG_COUNTRY || 'Болгарія',
     statuses: list(process.env.BG_STATUSES, ['Confirmed', 'Confirmed Print']),
     elineProviderName: process.env.BG_ELINE_PROVIDER || 'E.Line Tour',
-    // Only act on bookings created on/after this date (creation date).
+    // Transfer suppliers handled for Bulgaria. We filter the TravelON list by the
+    // supplier (partner_id) so the BOOKING date is irrelevant — what matters is the
+    // CHECK-IN date (see runBulgaria). `writeToEline`: also push the phone into the
+    // Eline supplier portal (true only for E.Line Tour; Itravel has no portal).
+    suppliers: [
+      {
+        name: process.env.BG_ITRAVEL_PROVIDER || 'Itravel',
+        partnerId: process.env.BG_ITRAVEL_PARTNER_ID || '6572',
+        writeToEline: false,
+      },
+      {
+        name: process.env.BG_ELINE_PROVIDER || 'E.Line Tour',
+        partnerId: process.env.BG_ELINE_PARTNER_ID || '1259',
+        writeToEline: true,
+      },
+    ],
+    // TravelON status ids for the server-side status filter (Confirmed=2,
+    // Confirmed Print=3). Used together with the supplier filter.
+    statusIds: list(process.env.BG_STATUS_IDS, ['2', '3']),
+    // Only act on bookings whose CHECK-IN (date of entry) is this many days from
+    // today or later. 1 = tomorrow onward. Booking/creation date is NOT filtered.
+    checkinFromDays: num(process.env.BG_CHECKIN_FROM_DAYS, 1),
+    // (kept for reference; no longer used to filter — booking date can be anything)
     createdFromISO: process.env.BG_CREATED_FROM || '2026-01-01',
-    // How many list pages to page through when scanning (safety cap).
+    // How many list pages to page through per supplier when scanning (safety cap).
     maxListPages: num(process.env.BG_MAX_LIST_PAGES, 20),
     department: process.env.BG_DEPARTMENT || 'Бронювання',
     subject: process.env.BG_SUBJECT || 'Надання контактів водію автобуса',

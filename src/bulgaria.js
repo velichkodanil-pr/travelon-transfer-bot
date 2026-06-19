@@ -10,7 +10,7 @@
 // DRY_RUN: detects + logs intended actions, writes/sends nothing.
 import { config, BG_ASK_PATTERNS, BG_REMINDER_PATTERNS } from './config.js';
 import { log } from './logger.js';
-import { extractPhones, extractTouristPhones } from './phone.js';
+import { extractPhones } from './phone.js';
 import { ElineClient } from './eline.js';
 import { getWatch, setWatch } from './store.js';
 
@@ -20,6 +20,19 @@ const DASH = '-';
 function ddmmyyyyToISO(d) {
   const m = d && d.match(/(\d{2})\.(\d{2})\.(\d{4})/);
   return m ? `${m[3]}-${m[2]}-${m[1]}` : null;
+}
+// Earliest CHECK-IN date a Bulgaria booking may have to be in scope: today's date
+// in `tz` plus `days` days (1 => tomorrow). Returns YYYY-MM-DD.
+function checkinCutoffISO(tz, days = 1) {
+  const todayYMD = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+  const base = new Date(`${todayYMD}T00:00:00Z`);
+  base.setUTCDate(base.getUTCDate() + days);
+  return base.toISOString().slice(0, 10);
 }
 function ymdInTz(date, tz) {
   return new Intl.DateTimeFormat('en-CA', {
@@ -44,18 +57,40 @@ function shouldRemindNow(askedAtISO) {
   return hourInTz(new Date(), tz) >= 12;
 }
 
-function parseBulgariaRow(row) {
+// Parse a list row for a given transfer supplier. Keeps Bulgaria bookings of the
+// target statuses whose CHECK-IN date (column 10) is on/after `checkinFrom`.
+// Booking/creation date is intentionally ignored.
+function parseBulgariaRow(row, supplier, checkinFrom) {
   const flat = row.text || '';
   const idM = flat.match(/\b(\d{5})\b/);
-  const dateM = flat.match(/(\d{2}\.\d{2}\.\d{4})/);
-  if (!idM || !dateM) return null;
+  if (!idM) return null;
   if (!new RegExp(config.bulgaria.country, 'i').test(flat)) return null;
-  const elineM = flat.match(ELINE_REF_RE);
-  if (!elineM) return null;
   if (!row.status || !config.bulgaria.statuses.includes(row.status)) return null;
-  const iso = ddmmyyyyToISO(dateM[1]);
-  if (!iso || iso < config.bulgaria.createdFromISO) return null;
-  return { id: idM[1], elineNum: elineM[1], status: row.status, dateISO: iso };
+  const ci = ddmmyyyyToISO(row.checkin);
+  if (!ci || ci < checkinFrom) return null;
+  // E.Line bookings need their Eline reference (to update the portal); others don't.
+  let elineNum = null;
+  let supplierRef = null;
+  if (supplier.writeToEline) {
+    const m = flat.match(ELINE_REF_RE);
+    if (!m) return null;
+    elineNum = m[1];
+    supplierRef = m[1];
+  } else {
+    const esc = supplier.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = flat.match(new RegExp(esc + '\\s*-\\s*(\\d+)', 'i'));
+    supplierRef = m ? m[1] : null;
+  }
+  return {
+    id: idM[1],
+    supplier: supplier.name,
+    writeToEline: supplier.writeToEline,
+    elineNum,
+    supplierRef,
+    status: row.status,
+    checkinISO: ci,
+    bookingDateISO: ddmmyyyyToISO(row.bookingDate) || '',
+  };
 }
 
 async function writeToEline(booking, phones, summary, ensureEline) {
@@ -94,10 +129,10 @@ export async function runBulgaria(travelon) {
   // Builds a report row for a candidate, with sensible blank defaults.
   const mkRow = (c, o = {}) => ({
     bookingId: c.id,
-    elineRef: c.elineNum,
+    elineRef: c.supplierRef || c.elineNum || '',
     country: config.bulgaria.country,
-    bookingDate: c.dateISO || '',
-    checkinDate: '',
+    bookingDate: c.bookingDateISO || '',
+    checkinDate: c.checkinISO || '',
     phonePresent: '',
     asked: '',
     agentNumber: '',
@@ -109,34 +144,41 @@ export async function runBulgaria(travelon) {
   });
   const dryTag = config.dryRun ? 'DRY-RUN' : '';
 
-  // 1) Scan the list for Bulgaria + Eline + Confirmed candidates created >= cutoff.
-  // Page via direct ?page=N URLs (reliable, unlike clicking a flaky "Next" link).
+  // 1) Scan per transfer supplier. For each, filter the TravelON list by supplier
+  // (partner_id) + status server-side and CLEAR all date filters, then page the
+  // (small) result set keeping Bulgaria bookings whose CHECK-IN is tomorrow or
+  // later. Booking/creation date is intentionally NOT filtered.
+  const checkinFrom = checkinCutoffISO(config.tz, config.bulgaria.checkinFromDays);
+  log.info(`[BG] check-in cutoff (>= ${checkinFrom}); booking date: any`);
   const candidates = [];
   const seen = new Set();
-  for (let page = 1; page <= config.bulgaria.maxListPages; page++) {
-    const url = page > 1 ? `${config.requestsUrl}?page=${page}` : config.requestsUrl;
-    await travelon.page.goto(url, { waitUntil: 'domcontentloaded' }).catch(() => {});
-    await travelon.page.waitForTimeout(2500);
-    const rows = await travelon.scanRows();
-    if (!rows.length) break;
-    for (const r of rows) {
-      const c = parseBulgariaRow(r);
-      if (c && !seen.has(c.id)) {
-        seen.add(c.id);
-        candidates.push(c);
+  for (const supplier of config.bulgaria.suppliers) {
+    await travelon.applyBulgariaSupplierFilter(supplier.partnerId, config.bulgaria.statusIds);
+    let prevFirstId = null;
+    for (let page = 1; page <= config.bulgaria.maxListPages; page++) {
+      if (page > 1) {
+        await travelon.page
+          .goto(`${config.requestsUrl}?page=${page}`, { waitUntil: 'domcontentloaded' })
+          .catch(() => {});
+        await travelon.page.waitForTimeout(2000);
+      }
+      const rows = await travelon.scanRows();
+      const ids = rows.map((r) => (r.text.match(/\b(\d{5})\b/) || [])[1]).filter(Boolean);
+      if (!ids.length) break;
+      if (prevFirstId && ids[0] === prevFirstId) break; // same page repeated -> end
+      prevFirstId = ids[0];
+      for (const r of rows) {
+        const c = parseBulgariaRow(r, supplier, checkinFrom);
+        if (c && !seen.has(c.id)) {
+          seen.add(c.id);
+          candidates.push(c);
+        }
       }
     }
-    // Rows are newest-first; stop once the page's oldest row predates the cutoff.
-    const isoDates = rows
-      .map((r) => {
-        const m = (r.text || '').match(/(\d{2}\.\d{2}\.\d{4})/);
-        return m ? ddmmyyyyToISO(m[1]) : null;
-      })
-      .filter(Boolean);
-    const oldest = isoDates.length ? isoDates[isoDates.length - 1] : null;
-    if (oldest && oldest < config.bulgaria.createdFromISO) break;
   }
-  summary.matched = candidates.map((c) => `${c.id}/#${c.elineNum}`);
+  summary.matched = candidates.map(
+    (c) => `${c.id}/${c.supplier}${c.elineNum ? `#${c.elineNum}` : ''}`
+  );
   log.info(`[BG] Candidates: ${summary.matched.join(', ') || DASH}`);
 
   // 2) Process each candidate.
@@ -180,25 +222,33 @@ export async function runBulgaria(travelon) {
         const comments = await travelon.readComments();
         let phones = extractPhones(`${comments.user} ${comments.admin}`);
         if (phones.length) {
-          await writeToEline(c, phones, summary, ensureEline);
+          if (c.writeToEline) await writeToEline(c, phones, summary, ensureEline);
           await persist(c.id, { doneAt: new Date().toISOString(), phones, source: 'comments' });
           summary.rows.push(
             mkRow(c, {
               phonePresent: 'так',
               agentNumber: phones.join(' '),
               writtenInBooking: 'так',
-              writtenInEline: config.dryRun ? 'ні (вписав би)' : 'так',
+              writtenInEline: c.writeToEline
+                ? config.dryRun
+                  ? 'ні (вписав би)'
+                  : 'так'
+                : 'не потрібно',
               status: 'Зроблено',
-              note: [dryTag, 'телефон уже в коментарях заявки'].filter(Boolean).join(' · '),
+              note: [dryTag, `телефон уже в коментарях заявки (${c.supplier})`]
+                .filter(Boolean)
+                .join(' · '),
             })
           );
           continue;
         }
 
-        // (b) phone in the chat (agent reply)?
+        // (b) phone in the chat? Any number written by the agent in the chat panel
+        // counts as the tourist's (per operator guidance — other numbers are not
+        // posted there). Read the PANEL only, never the whole page.
         await travelon.openChat(c.id);
-        const chatText = await travelon.readChatText();
-        phones = extractTouristPhones(chatText);
+        const chatText = await travelon.readChatPanelText();
+        phones = extractPhones(chatText);
         if (phones.length) {
           await travelon.closeChat(c.id).catch(() => {});
           await travelon.openEdit(c.id);
@@ -209,16 +259,20 @@ export async function runBulgaria(travelon) {
               ', '
             )}] to both comment fields`
           );
-          await writeToEline(c, phones, summary, ensureEline);
+          if (c.writeToEline) await writeToEline(c, phones, summary, ensureEline);
           await persist(c.id, { doneAt: new Date().toISOString(), phones, source: 'chat' });
           summary.rows.push(
             mkRow(c, {
               phonePresent: 'так',
               agentNumber: phones.join(' '),
               writtenInBooking: config.dryRun ? 'ні (вписав би)' : 'так',
-              writtenInEline: config.dryRun ? 'ні (вписав би)' : 'так',
+              writtenInEline: c.writeToEline
+                ? config.dryRun
+                  ? 'ні (вписав би)'
+                  : 'так'
+                : 'не потрібно',
               status: 'Зроблено',
-              note: [dryTag, 'номер із чату агента'].filter(Boolean).join(' · '),
+              note: [dryTag, `номер із чату агента (${c.supplier})`].filter(Boolean).join(' · '),
             })
           );
           continue;

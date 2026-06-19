@@ -354,6 +354,13 @@ export class TravelonClient {
     return (await this.page.locator('body').innerText().catch(() => '')) || '';
   }
 
+  // Panel-only chat text (NEVER the whole page) — used for phone extraction so we
+  // don't grab numbers from the request grid / page chrome.
+  async readChatPanelText() {
+    const panel = await this.firstExisting(sel.chat.panel, { timeout: 1500 });
+    return panel ? (await panel.innerText().catch(() => '')) || '' : '';
+  }
+
   async chatAlreadyRequested() {
     const text = await this.readChatText();
     return ALREADY_SENT_PATTERNS.some((re) => re.test(text));
@@ -469,19 +476,68 @@ export class TravelonClient {
 
   // ---- List scanning / pagination (Bulgaria workflow) ----
 
+  // Apply the TravelON list filter for ONE Bulgaria transfer supplier: filter by
+  // supplier (partner_id) + status, and CLEAR every date filter (booking date is
+  // irrelevant — we filter CHECK-IN client-side). The filter is a POST form whose
+  // state persists in the session, so subsequent ?page=N GETs stay filtered.
+  async applyBulgariaSupplierFilter(partnerId, statusIds) {
+    await this.page.goto(config.requestsUrl, { waitUntil: 'domcontentloaded' });
+    await this.page.waitForTimeout(1500);
+    await this.page.evaluate(
+      ({ partnerId, statusIds }) => {
+        const form =
+          document.querySelector('form[action="/book/bundle/index"]') ||
+          document.querySelector('form');
+        if (!form) return;
+        const partner = form.querySelector('select[name="filter[partner_id]"]');
+        if (partner) partner.value = partnerId;
+        const st = form.querySelector('select[name="filter[status_ids][]"]');
+        if (st) Array.from(st.options).forEach((o) => (o.selected = statusIds.includes(o.value)));
+        const mkt = form.querySelector('select[name="filter[market_state_ids][]"]');
+        if (mkt) Array.from(mkt.options).forEach((o) => (o.selected = false));
+        const sv = form.querySelector('[name="filter[search]"]');
+        if (sv) sv.value = '';
+        [
+          'filter[from_order]',
+          'filter[to_order]',
+          'filter[from_entry]',
+          'filter[to_entry]',
+          'filter[from_exit]',
+          'filter[to_exit]',
+        ].forEach((n) => {
+          const el = form.querySelector(`[name="${n}"]`);
+          if (el) el.value = '';
+        });
+        form.submit();
+      },
+      { partnerId, statusIds }
+    );
+    await this.page.waitForLoadState('domcontentloaded').catch(() => {});
+    await this.page.waitForTimeout(2500);
+  }
+
   async scanRows() {
     return await this.page
       .locator(sel.requests.resultRows)
       .evaluateAll((trs) =>
         trs.map((tr) => {
-          const text = (tr.innerText || '').replace(/\s+/g, ' ').trim();
+          const norm = (x) => (x || '').replace(/\s+/g, ' ').trim();
+          const text = norm(tr.innerText);
           const statusCell = Array.from(tr.querySelectorAll('td')).find((td) =>
             /Room status/i.test(td.innerText)
           );
           const status = statusCell
             ? statusCell.innerText.split(/Room status/i)[0].replace(/\s+/g, ' ').trim()
             : null;
-          return { text, status };
+          // "Date of check in" (date of entry) is column index 10 among the row's
+          // DIRECT cells. Nested sub-rows have fewer cells -> checkin stays ''.
+          const cells = Array.from(tr.children);
+          const cm = cells[10] ? norm(cells[10].innerText).match(/\d{2}\.\d{2}\.\d{4}/) : null;
+          const checkin = cm ? cm[0] : '';
+          // "Date of request" (booking date) is column index 6.
+          const bm = cells[6] ? norm(cells[6].innerText).match(/\d{2}\.\d{2}\.\d{4}/) : null;
+          const bookingDate = bm ? bm[0] : '';
+          return { text, status, checkin, bookingDate };
         })
       )
       .catch(() => []);
