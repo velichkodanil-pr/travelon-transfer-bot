@@ -71,11 +71,22 @@ export function extractTouristPhones(text) {
 
 // --- Supplier-message helpers (Itravel cabinet) -------------------------------
 
-// Return the phones NOT already present in `text` (compared by canonical form,
-// so any written format counts). Used to avoid posting the same number twice.
+// Return the phones NOT already present in `text`, in CANONICAL form, de-duplicated.
+// Both sides are compared by canonical +380XXXXXXXXX, so a number written without
+// "+" (e.g. an old stored value "380631706806") still matches the same number in
+// the thread written as "+380631706806". This is the dedup that prevents resending.
 export function phonesMissingFromText(phones, text) {
   const present = new Set(extractPhones(text || ''));
-  return (phones || []).filter((p) => !present.has(p));
+  const out = [];
+  const seen = new Set();
+  for (const p of phones || []) {
+    const canon = normalizeUaPhone(p) || p; // fall back to raw if unparseable
+    if (!present.has(canon) && !seen.has(canon)) {
+      seen.add(canon);
+      out.push(canon);
+    }
+  }
+  return out;
 }
 
 // Build a supplier message from a template, replacing `{phones}` with the

@@ -71,6 +71,14 @@ test('phonesMissingFromText returns only numbers not already in the thread', () 
   assert.deepEqual(phonesMissingFromText(['+380675941821'], ''), ['+380675941821']);
 });
 
+test('phonesMissingFromText is format-agnostic (the #73993 duplicate bug)', () => {
+  // Thread has the numbers WITH "+"; the bot holds them WITHOUT "+" (old store).
+  const thread = '+380631706806 Наталія\n+380635673965 Анна';
+  assert.deepEqual(phonesMissingFromText(['380631706806', '380635673965'], thread), []);
+  // A genuinely new number is returned in canonical +380 form.
+  assert.deepEqual(phonesMissingFromText(['380631706806', '0509998877'], thread), ['+380509998877']);
+});
+
 test('buildPhoneMessage fills the {phones} template', () => {
   assert.equal(
     buildPhoneMessage('Контакт туриста для водія трансферу: {phones}', ['+380675941821']),
