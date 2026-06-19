@@ -149,10 +149,21 @@ export const ALREADY_SENT_PATTERNS = [
   /телефон.*трансфер/i,
 ];
 
-// Ukrainian phone formats to recognise in comment fields / chat:
-// 380XXXXXXXXX (12), 80XXXXXXXXX (11), 0XXXXXXXXX (10).
-// Boundaries prevent matching inside a longer digit run.
+// Ukrainian phone formats to recognise in comment fields / chat.
+// Canonical (digits only): 380XXXXXXXXX (12), 80XXXXXXXXX (11), 0XXXXXXXXX (10).
+// PHONE_RE matches a number written WITHOUT separators (kept for reference /
+// exact digit matching). Boundaries prevent matching inside a longer digit run.
 export const PHONE_RE = /(?<!\d)(?:380\d{9}|80\d{9}|0\d{9})(?!\d)/g;
+
+// Agents almost always type numbers the "human" way, WITH separators —
+// "+380(67)594-18-21", "+380 97 425 81 22", "0(63)384-60-02". PHONE_CANDIDATE_RE
+// finds such phone-shaped tokens; phone.js then strips each to digits and
+// validates/canonicalises it via normalizeUaPhone(). The character class allows
+// only digits, spaces/tabs, dots, dashes, parentheses and nbsp (plus an optional
+// leading "+") — it deliberately EXCLUDES commas, slashes, colons, letters and
+// newlines, so it never fuses list items ("місця 1,2"), dates ("04/24/2026"),
+// times ("10:59"), route/seat codes ("ТК2139") or two numbers on separate lines.
+export const PHONE_CANDIDATE_RE = /\+?\d[\d \t.() -]{6,20}\d/g;
 
 // Detect that WE already asked / reminded in a Bulgaria chat (dedup).
 export const BG_ASK_PATTERNS = [/перевізник/i, /контакт.*турист.*перевізник/i];
