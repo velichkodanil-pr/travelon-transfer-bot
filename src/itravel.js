@@ -1,9 +1,9 @@
 // ItravelClient — Playwright client for the Itravel supplier CLIENT cabinet
 // (i-travel.com.ua, WordPress). SEPARATE login from TravelON.
-// Sends the tourist phone into a booking's "Повідомлення" thread:
-//   open /client-profile/?id=<orderNo> -> click the order's "Повідомлення" link
-//   (openChat, the page supplies the token) -> read the thread (dedup) -> type
-//   the phone -> ВІДПРАВИТИ.
+// Login: standard WordPress wp-login.php (log/pwd). Auth is then verified by
+// loading the profile page (wp-login redirects elsewhere after a successful login).
+// Messaging: open /client-profile/?id=<orderNo> -> click the order's "Повідомлення"
+// link (openChat, page supplies the token) -> read thread (dedup) -> type -> ВІДПРАВИТИ.
 import { chromium } from 'playwright';
 import { config, sel } from './config.js';
 import { log } from './logger.js';
@@ -48,6 +48,11 @@ export class ItravelClient {
     return null;
   }
 
+  profileUrl() {
+    return `${config.itravel.baseUrl}${config.itravel.profilePath}`;
+  }
+
+  // Logged in == the order-search input is present on the profile page.
   async isLoggedIn() {
     return Boolean(await this.firstExisting(sel.itravel.loggedInMarker, { timeout: 1500 }));
   }
@@ -57,11 +62,16 @@ export class ItravelClient {
       throw new Error('ITRAVEL_EMAIL / ITRAVEL_PASSWORD not set');
     }
     log.info('[Itravel] Logging in…');
-    await this.page.goto(config.itravel.loginUrl, { waitUntil: 'domcontentloaded' });
+    // 1) Maybe already authenticated (warm cookie) — check on the profile page.
+    await this.page.goto(this.profileUrl(), { waitUntil: 'domcontentloaded' });
+    await this.page.waitForTimeout(1200);
     if (await this.isLoggedIn()) {
       log.info('[Itravel] Already authenticated.');
       return;
     }
+    // 2) Submit the WordPress login form (wp-login.php: log / pwd / wp-submit).
+    await this.page.goto(config.itravel.loginUrl, { waitUntil: 'domcontentloaded' });
+    await this.page.waitForTimeout(1000);
     const e = await this.firstExisting(sel.itravel.loginEmail);
     const p = await this.firstExisting(sel.itravel.loginPassword);
     if (!e || !p) {
@@ -73,19 +83,32 @@ export class ItravelClient {
     if (s) await s.click();
     else await p.press('Enter');
     await this.page.waitForLoadState('domcontentloaded').catch(() => {});
-    await this.page.waitForTimeout(2000);
-    if (!(await this.isLoggedIn())) throw new Error('[Itravel] Login failed (marker not found)');
+    await this.page.waitForTimeout(2500);
+    // 3) Verify by loading the profile page (wp-login redirects elsewhere on success).
+    await this.page.goto(this.profileUrl(), { waitUntil: 'domcontentloaded' });
+    await this.page.waitForTimeout(1200);
+    if (!(await this.isLoggedIn())) {
+      throw new Error('[Itravel] Login failed (profile marker not found after submit)');
+    }
     log.info('[Itravel] Login OK.');
   }
 
-  // Open the "Повідомлення" modal for one order. Throws if the order/chat is not found.
+  // Open the "Повідомлення" modal for one order. Throws with a precise reason.
   async openBookingMessages(orderNo) {
-    const url = `${config.itravel.baseUrl}${config.itravel.profilePath}?id=${encodeURIComponent(orderNo)}`;
+    const url = `${this.profileUrl()}?id=${encodeURIComponent(orderNo)}`;
     await this.page.goto(url, { waitUntil: 'domcontentloaded' });
     await this.page.waitForTimeout(1500);
-    const btn = this.page.locator(sel.itravel.messageButton).first();
-    if ((await btn.count().catch(() => 0)) === 0) {
-      throw new Error(`order ${orderNo} not found in Itravel cabinet (no "Повідомлення" button)`);
+    const btn = await this.firstExisting(sel.itravel.messageButton, { timeout: 10000 });
+    if (!btn) {
+      const loggedIn = await this.isLoggedIn();
+      if (!loggedIn) {
+        throw new Error(
+          `Itravel cabinet not logged in when opening order ${orderNo} (login failed — check ITRAVEL_LOGIN_URL / creds / sel.itravel.login*)`
+        );
+      }
+      throw new Error(
+        `order ${orderNo} not found in Itravel cabinet (logged in, but no "Повідомлення" button — wrong order number, or archived/past booking)`
+      );
     }
     await btn.click({ timeout: 5000 }).catch(() => {});
     const input = await this.firstExisting(sel.itravel.chatInput, { timeout: 8000 });

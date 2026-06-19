@@ -35,8 +35,6 @@ export const config = {
   maxSendsPerRun: num(process.env.MAX_SENDS_PER_RUN, 25),
 
   // --- matching ---
-  // Generic "transfer drivers" message countries. Болгарія is intentionally
-  // NOT here — Bulgaria is handled by the dedicated Eline workflow below.
   targetCountries: list(process.env.TARGET_COUNTRIES, [
     'Греція',
     'Албанія',
@@ -62,11 +60,8 @@ export const config = {
     country: process.env.BG_COUNTRY || 'Болгарія',
     statuses: list(process.env.BG_STATUSES, ['Confirmed', 'Confirmed Print']),
     elineProviderName: process.env.BG_ELINE_PROVIDER || 'E.Line Tour',
-    // Transfer suppliers handled for Bulgaria. We filter the TravelON list by the
-    // supplier (partner_id) so the BOOKING date is irrelevant — what matters is the
-    // CHECK-IN date (see runBulgaria). `writeToEline`: also push the phone into the
-    // Eline supplier portal (true only for E.Line Tour). `messageItravel`: send the
-    // phone into the Itravel client cabinet booking thread (true only for Itravel).
+    // `writeToEline`: push the phone into the Eline portal (E.Line only).
+    // `messageItravel`: send the phone into the Itravel client cabinet (Itravel only).
     suppliers: [
       {
         name: process.env.BG_ITRAVEL_PROVIDER || 'Itravel',
@@ -80,15 +75,9 @@ export const config = {
         writeToEline: true,
       },
     ],
-    // TravelON status ids for the server-side status filter (Confirmed=2,
-    // Confirmed Print=3). Used together with the supplier filter.
     statusIds: list(process.env.BG_STATUS_IDS, ['2', '3']),
-    // Only act on bookings whose CHECK-IN (date of entry) is this many days from
-    // today or later. 1 = tomorrow onward. Booking/creation date is NOT filtered.
     checkinFromDays: num(process.env.BG_CHECKIN_FROM_DAYS, 1),
-    // (kept for reference; no longer used to filter — booking date can be anything)
     createdFromISO: process.env.BG_CREATED_FROM || '2026-01-01',
-    // How many list pages to page through per supplier when scanning (safety cap).
     maxListPages: num(process.env.BG_MAX_LIST_PAGES, 20),
     department: process.env.BG_DEPARTMENT || 'Бронювання',
     subject: process.env.BG_SUBJECT || 'Надання контактів водію автобуса',
@@ -107,17 +96,16 @@ export const config = {
     loginUrl: process.env.ELINE_LOGIN_URL || 'https://eline-tour.com.ua/admin/users/sign_in',
   },
   // Itravel supplier CLIENT CABINET (i-travel.com.ua, WordPress). SEPARATE login.
-  // The bot opens /client-profile/?id=<orderNo>, clicks the order's "Повідомлення"
-  // link and sends the tourist phone into the booking thread. orderNo = the
-  // "Itravel - NNNN" supplier reference captured from the TravelON list.
+  // Login is standard WordPress (wp-login.php, fields log/pwd). After login we verify
+  // by loading the profile page. The bot opens /client-profile/?id=<orderNo>, clicks
+  // the order's "Повідомлення" link and sends the tourist phone into the thread.
   itravel: {
     enabled: bool(process.env.BG_ITRAVEL_MESSAGE_ENABLED, true),
     email: process.env.ITRAVEL_EMAIL || '',
     password: process.env.ITRAVEL_PASSWORD || '',
     baseUrl: (process.env.ITRAVEL_BASE_URL || 'https://www.i-travel.com.ua').replace(/\/$/, ''),
-    loginUrl: process.env.ITRAVEL_LOGIN_URL || 'https://www.i-travel.com.ua/client-profile/',
+    loginUrl: process.env.ITRAVEL_LOGIN_URL || 'https://www.i-travel.com.ua/wp-login.php',
     profilePath: process.env.ITRAVEL_PROFILE_PATH || '/client-profile/',
-    // {phones} is replaced with the comma-separated canonical numbers.
     messageText:
       process.env.ITRAVEL_MESSAGE_TEXT || 'Контакт туриста для водія трансферу: {phones}',
   },
@@ -150,8 +138,7 @@ export const config = {
   logLevel: (process.env.LOG_LEVEL || 'info').toLowerCase(),
 };
 
-// Phrases that mean "a transfer / driver phone request was already sent in this
-// chat" — used to avoid sending a duplicate. Case-insensitive, accent-tolerant.
+// Phrases that mean "a transfer / driver phone request was already sent".
 export const ALREADY_SENT_PATTERNS = [
   /телефон\s+турист/i,
   /тел\.?\s+турист/i,
@@ -162,29 +149,20 @@ export const ALREADY_SENT_PATTERNS = [
   /телефон.*трансфер/i,
 ];
 
-// Ukrainian phone formats to recognise in comment fields / chat.
-// Canonical (digits only): 380XXXXXXXXX (12), 80XXXXXXXXX (11), 0XXXXXXXXX (10).
-// PHONE_RE matches a number written WITHOUT separators (kept for reference /
-// exact digit matching). Boundaries prevent matching inside a longer digit run.
+// Ukrainian phone formats. PHONE_RE matches a number WITHOUT separators (exact).
 export const PHONE_RE = /(?<!\d)(?:380\d{9}|80\d{9}|0\d{9})(?!\d)/g;
 
-// Agents almost always type numbers the "human" way, WITH separators —
-// "+380(67)594-18-21", "+380 97 425 81 22", "0(63)384-60-02". PHONE_CANDIDATE_RE
-// finds such phone-shaped tokens; phone.js then strips each to digits and
-// validates/canonicalises it via normalizeUaPhone(). The character class allows
-// only digits, spaces/tabs, dots, dashes, parentheses and nbsp (plus an optional
-// leading "+") — it deliberately EXCLUDES commas, slashes, colons, letters and
-// newlines, so it never fuses list items ("місця 1,2"), dates ("04/24/2026"),
-// times ("10:59"), route/seat codes ("ТК2139") or two numbers on separate lines.
+// PHONE_CANDIDATE_RE finds phone-shaped tokens WITH human separators (parentheses,
+// dashes, spaces, dots) which phone.js normalises via normalizeUaPhone(). The class
+// excludes commas/slashes/colons/letters/newlines so it never fuses dates, times,
+// seat lists or two numbers on separate lines.
 export const PHONE_CANDIDATE_RE = /\+?\d[\d \t.() -]{6,20}\d/g;
 
-// Detect that WE already asked / reminded in a Bulgaria chat (dedup).
 export const BG_ASK_PATTERNS = [/перевізник/i, /контакт.*турист.*перевізник/i];
 export const BG_REMINDER_PATTERNS = [/нагадуємо.*контакт/i, /нагадуємо.*воді/i];
 
 // ----------------------------------------------------------------------------
-// SELECTORS — the brittle part. Best-effort guesses based on the observed UI.
-// Verify/fix against the live DOM with: npm run codegen (see README).
+// SELECTORS — verify/fix against the live DOM with: npm run codegen.
 // ----------------------------------------------------------------------------
 export const sel = {
   login: {
@@ -243,44 +221,36 @@ export const sel = {
     ],
   },
 
-  // TravelON booking edit page (/book/bundle/edit/{id}) — comment fields.
   edit: {
-    commentUser: 'textarea[name="bundle[comment]"]', // "Comments for user"
-    commentAdmin: 'textarea[name="bundle[comment_admin]"]', // "Commentary for the administration"
-    saveButton: 'button[name="commit"]', // "Save"
+    commentUser: 'textarea[name="bundle[comment]"]',
+    commentAdmin: 'textarea[name="bundle[comment_admin]"]',
+    saveButton: 'button[name="commit"]',
   },
 
-  // Eline supplier portal booking edit page — per-passenger phone inputs.
   eline: {
     loginEmail: ['input[type="email"]', 'input[name*="email" i]', 'input[name="user[email]"]'],
     loginPassword: ['input[type="password"]', 'input[name="user[password]"]'],
     loginSubmit: ['button[type="submit"]', 'input[type="submit"]'],
     loggedInMarker: ['text=ЗАЯВКИ', 'text=Панель управління', 'text=Транспортал'],
     passengerPhone: 'input[name="passenger[][telephone]"]',
-    saveButton: 'button[name="commit"]', // "Зберегти"
+    saveButton: 'button[name="commit"]',
   },
 
-  // Itravel CLIENT cabinet (i-travel.com.ua). Order search is via URL ?id=<orderNo>;
-  // the per-order "Повідомлення" link calls openChat(order, token, date) — we click
-  // it so the page supplies the token. Login selectors are best-effort (WordPress) —
-  // verify with codegen against the login page and set ITRAVEL_LOGIN_URL if different.
+  // Itravel CLIENT cabinet (i-travel.com.ua). Login is standard WordPress
+  // (wp-login.php: name="log" / name="pwd" / #wp-submit). loggedInMarker is the
+  // order-search input, present only in the authenticated cabinet. Order search is
+  // via URL ?id=<orderNo>; per-order "Повідомлення" link calls openChat(order, token).
   itravel: {
     loginEmail: [
+      'input[name="log"]',
+      '#user_login',
       'input[type="email"]',
       'input[name*="email" i]',
       'input[name*="login" i]',
-      'input[name="log"]',
-      '#user_login',
     ],
-    loginPassword: ['input[type="password"]', 'input[name*="pass" i]', 'input[name="pwd"]', '#user_pass'],
-    loginSubmit: [
-      'button[type="submit"]',
-      'input[type="submit"]',
-      '#wp-submit',
-      'button:has-text("Увійти")',
-      'button:has-text("Вхід")',
-    ],
-    loggedInMarker: ['text=Особистий кабінет', 'a:has-text("Вихід")', 'text=Замовлення'],
+    loginPassword: ['input[name="pwd"]', '#user_pass', 'input[type="password"]'],
+    loginSubmit: ['#wp-submit', 'input[name="wp-submit"]', 'button[type="submit"]', 'input[type="submit"]'],
+    loggedInMarker: ['#search_booking_number', 'a:has-text("Вихід")'],
     messageButton: 'a[onclick^="openChat("]',
     chatPopup: '#chatPopup',
     chatMessages: '#chatMessages',
