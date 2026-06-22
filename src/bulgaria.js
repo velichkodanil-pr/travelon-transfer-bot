@@ -18,6 +18,9 @@ import { getWatch, setWatch } from './store.js';
 
 const ELINE_REF_RE = /E\.?\s*Line\s*Tour\s*-\s*(\d+)/i;
 const DASH = '-';
+// A field value counts as a real phone if it has >= 9 digits (robust to any
+// portal formatting like "+380 (67) 594-18-21").
+const looksLikePhone = (v) => String(v || '').replace(/\D/g, '').length >= 9;
 
 function ddmmyyyyToISO(d) {
   const m = d && d.match(/(\d{2})\.(\d{2})\.(\d{4})/);
@@ -104,6 +107,17 @@ async function writeToEline(booking, phones, summary, ensureEline) {
   }
   const eline = await ensureEline();
   await eline.openBooking(booking.elineNum);
+  // Already filled in the portal? Leave it — never overwrite an existing number.
+  const existing = (await eline.readPassengerPhones()).filter(looksLikePhone);
+  if (existing.length) {
+    log.info(
+      `[BG] ${booking.id} Eline#${booking.elineNum}: phone already in portal [${existing.join(
+        ', '
+      )}] — not rewriting.`
+    );
+    summary.eline.push(`${booking.id}->#${booking.elineNum} already-present`);
+    return;
+  }
   const res = await eline.writePassengerPhones(phones, { dryRun: config.dryRun });
   const verb = config.dryRun ? 'WOULD set' : 'set';
   log.info(
@@ -371,6 +385,44 @@ export async function runBulgaria(travelon) {
             })
           );
           continue;
+        }
+
+        // (b.5) E.Line: phone ALREADY in the Eline portal (e.g. the agent filled
+        // it directly)? Treat as done — don't ask, don't write anything.
+        if (c.writeToEline && config.eline.email && config.eline.password) {
+          let elinePhones = [];
+          try {
+            const el = await ensureEline();
+            await el.openBooking(c.elineNum);
+            elinePhones = (await el.readPassengerPhones()).filter(looksLikePhone);
+          } catch (err) {
+            summary.errors.push(`${c.id}: Eline precheck failed: ${err.message}`);
+            log.error(`[BG] ${c.id}: Eline precheck failed:`, err.message);
+          }
+          if (elinePhones.length) {
+            log.info(
+              `[BG] ${c.id} Eline#${c.elineNum}: phone already in portal [${elinePhones.join(
+                ', '
+              )}] — marking done, no ask.`
+            );
+            await travelon.closeChat(c.id).catch(() => {});
+            await persist(c.id, {
+              doneAt: new Date().toISOString(),
+              phones: elinePhones,
+              source: 'eline-prefilled',
+            });
+            summary.skippedDone.push(`${c.id} (eline)`);
+            summary.rows.push(
+              mkRow(c, {
+                phonePresent: 'так',
+                agentNumber: elinePhones.join(' '),
+                writtenInEline: 'так',
+                status: 'Зроблено',
+                note: [dryTag, 'номер уже в Eline-порталі'].filter(Boolean).join(' · '),
+              })
+            );
+            continue;
+          }
         }
 
         // (c) nowhere -> ask / remind

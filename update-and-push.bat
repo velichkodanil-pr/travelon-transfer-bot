@@ -8,7 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 git add .
-git commit -m "Bulgaria: reliable list pagination via ?page=N URLs"
+git commit -m "Eline: skip booking if phone already in portal (no rewrite, no re-ask)"
 git push
 
 echo.

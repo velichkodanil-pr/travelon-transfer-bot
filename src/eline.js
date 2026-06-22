@@ -78,6 +78,20 @@ export class ElineClient {
     await this.page.waitForTimeout(2500);
   }
 
+  // Read the current per-passenger phone field values (non-empty, trimmed).
+  // Used to detect a booking whose phone is ALREADY in the portal so we never
+  // rewrite or re-ask for it.
+  async readPassengerPhones() {
+    const inputs = this.page.locator(sel.eline.passengerPhone);
+    const count = await inputs.count().catch(() => 0);
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      const v = await inputs.nth(i).inputValue().catch(() => '');
+      if (v && v.trim()) out.push(v.trim());
+    }
+    return out;
+  }
+
   // Fill the per-passenger phone inputs. In dryRun, computes the plan but writes
   // nothing. Returns { count, plan:[...], wrote }.
   async writePassengerPhones(phones, { dryRun }) {
