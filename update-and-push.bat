@@ -8,7 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 git add .
-git commit -m "Eline: skip booking if phone already in portal (no rewrite, no re-ask)"
+git commit -m "Fix: never take the agent's own number (booking Telephone) as tourist phone; exclude it from comments/chat/Eline; strict UA phone validation"
 git push
 
 echo.

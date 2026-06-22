@@ -452,6 +452,14 @@ export class TravelonClient {
     return { user: await get(sel.edit.commentUser), admin: await get(sel.edit.commentAdmin) };
   }
 
+  // The booking "Telephone" field holds the TRAVEL AGENT's number, never the
+  // tourist's — callers EXCLUDE it from any phone they use.
+  async readAgentPhone() {
+    const loc = this.page.locator('input[name="bundle[telephone]"]').first();
+    if ((await loc.count().catch(() => 0)) === 0) return '';
+    return (await loc.inputValue().catch(() => '')) || '';
+  }
+
   // Append the phone string to BOTH comment fields (if absent), then save.
   async appendPhonesToComments(phones, { dryRun }) {
     const phoneStr = phones.join(' ');

@@ -11,7 +11,7 @@
 // DRY_RUN: detects + logs intended actions, writes/sends nothing.
 import { config, BG_ASK_PATTERNS, BG_REMINDER_PATTERNS } from './config.js';
 import { log } from './logger.js';
-import { extractPhones } from './phone.js';
+import { extractPhones, normalizeUaPhone } from './phone.js';
 import { ElineClient } from './eline.js';
 import { ItravelClient } from './itravel.js';
 import { getWatch, setWatch } from './store.js';
@@ -20,7 +20,10 @@ const ELINE_REF_RE = /E\.?\s*Line\s*Tour\s*-\s*(\d+)/i;
 const DASH = '-';
 // A field value counts as a real phone if it has >= 9 digits (robust to any
 // portal formatting like "+380 (67) 594-18-21").
-const looksLikePhone = (v) => String(v || '').replace(/\D/g, '').length >= 9;
+// A field value counts as a phone ONLY if it is a valid UA number (380/80/0
+// formats). Prevents non-phones (e.g. a wrong 13-digit value in the Eline
+// portal field) from being mistaken for a tourist phone.
+const looksLikePhone = (v) => Boolean(normalizeUaPhone(v));
 
 function ddmmyyyyToISO(d) {
   const m = d && d.match(/(\d{2})\.(\d{2})\.(\d{4})/);
@@ -99,7 +102,7 @@ function parseBulgariaRow(row, supplier, checkinFrom) {
   };
 }
 
-async function writeToEline(booking, phones, summary, ensureEline) {
+async function writeToEline(booking, phones, summary, ensureEline, agentPhone) {
   if (!config.eline.email || !config.eline.password) {
     summary.errors.push(`${booking.id}: ELINE creds missing, portal step skipped`);
     log.warn(`[BG] ${booking.id}: Eline creds not set; cannot write portal #${booking.elineNum}.`);
@@ -108,7 +111,9 @@ async function writeToEline(booking, phones, summary, ensureEline) {
   const eline = await ensureEline();
   await eline.openBooking(booking.elineNum);
   // Already filled in the portal? Leave it — never overwrite an existing number.
-  const existing = (await eline.readPassengerPhones()).filter(looksLikePhone);
+  const existing = (await eline.readPassengerPhones())
+    .filter(looksLikePhone)
+    .filter((p) => normalizeUaPhone(p) !== agentPhone);
   if (existing.length) {
     log.info(
       `[BG] ${booking.id} Eline#${booking.elineNum}: phone already in portal [${existing.join(
@@ -302,9 +307,13 @@ export async function runBulgaria(travelon) {
         // (a) phone already in the comment fields?
         await travelon.openEdit(c.id);
         const comments = await travelon.readComments();
-        let phones = extractPhones(`${comments.user} ${comments.admin}`);
+        // The booking Telephone field is the AGENT's number — never the tourist's.
+        const agentPhone = normalizeUaPhone(await travelon.readAgentPhone());
+        let phones = extractPhones(`${comments.user} ${comments.admin}`).filter(
+          (p) => p !== agentPhone
+        );
         if (phones.length) {
-          if (c.writeToEline) await writeToEline(c, phones, summary, ensureEline);
+          if (c.writeToEline) await writeToEline(c, phones, summary, ensureEline, agentPhone);
           let itravelMsgAt = null;
           if (c.messageItravel) {
             try {
@@ -343,7 +352,7 @@ export async function runBulgaria(travelon) {
         // counts as the tourist's (per operator guidance). Read the PANEL only.
         await travelon.openChat(c.id);
         const chatText = await travelon.readChatPanelText();
-        phones = extractPhones(chatText);
+        phones = extractPhones(chatText).filter((p) => p !== agentPhone);
         if (phones.length) {
           await travelon.closeChat(c.id).catch(() => {});
           await travelon.openEdit(c.id);
@@ -354,7 +363,7 @@ export async function runBulgaria(travelon) {
               ', '
             )}] to both comment fields`
           );
-          if (c.writeToEline) await writeToEline(c, phones, summary, ensureEline);
+          if (c.writeToEline) await writeToEline(c, phones, summary, ensureEline, agentPhone);
           let itravelMsgAt = null;
           if (c.messageItravel) {
             try {
@@ -394,7 +403,9 @@ export async function runBulgaria(travelon) {
           try {
             const el = await ensureEline();
             await el.openBooking(c.elineNum);
-            elinePhones = (await el.readPassengerPhones()).filter(looksLikePhone);
+            elinePhones = (await el.readPassengerPhones())
+              .filter(looksLikePhone)
+              .filter((p) => normalizeUaPhone(p) !== agentPhone);
           } catch (err) {
             summary.errors.push(`${c.id}: Eline precheck failed: ${err.message}`);
             log.error(`[BG] ${c.id}: Eline precheck failed:`, err.message);
