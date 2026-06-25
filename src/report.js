@@ -49,6 +49,24 @@ function nowInTz() {
   return `${date} ${time}`;
 }
 
+// Поточні складові часу в часовому поясі ТАБЛИЦІ (щоб NOW()-heartbeat був точний).
+function dateParts(date, tz) {
+  const f = new Intl.DateTimeFormat('en-GB', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const p = {};
+  for (const part of f.formatToParts(date)) if (part.type !== 'literal') p[part.type] = part.value;
+  const h = p.hour === '24' ? '00' : p.hour;
+  return { y: +p.year, mo: +p.month, d: +p.day, h: +h, mi: +p.minute, s: +p.second };
+}
+
 // Об'єкт рядка -> масив значень у фіксованому порядку стовпців.
 function rowToValues(r, updatedAt) {
   return [
@@ -148,4 +166,42 @@ export async function upsertRows(rows) {
 
   log.info(`[report] Google Sheet: ${updated} оновлено, ${appends.length} додано.`);
   return { updated, appended: appends.length };
+}
+
+// Пише «пульс» бота + бейдж статусу праворуч угорі звіту (комірки O1:R1):
+//   O1 = підпис, P1 = бейдж 🟢/🔴 (формула на NOW()), Q1 = людський час,
+//   R1 = технічний час останнього запуску (вхід для формули).
+// Бейдж САМ перемикається на «НЕ АКТИВНИЙ», якщо бот не оновлював > 90 хв.
+// Best-effort: ніколи не кидає виняток.
+export async function writeBotStatus() {
+  if (!reportEnabled()) return;
+  try {
+    const r = config.report;
+    const sheets = await getSheets();
+    const tab = await resolveTab(sheets);
+    let tz = config.tz;
+    try {
+      const meta = await sheets.spreadsheets.get({
+        spreadsheetId: r.spreadsheetId,
+        fields: 'properties.timeZone',
+      });
+      tz = meta.data.properties?.timeZone || config.tz;
+    } catch {
+      /* лишаємо config.tz */
+    }
+    const p = dateParts(new Date(), tz);
+    const pad = (n) => String(n).padStart(2, '0');
+    const readable = `оновлено ${pad(p.d)}.${pad(p.mo)}.${p.y} ${pad(p.h)}:${pad(p.mi)}`;
+    const heartbeat = `=DATE(${p.y},${p.mo},${p.d})+TIME(${p.h},${p.mi},${p.s})`;
+    const badge = '=IF((NOW()-$R$1)*1440<=90,"🟢 БОТ АКТИВНИЙ","🔴 БОТ НЕ АКТИВНИЙ")';
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: r.spreadsheetId,
+      range: `${tab}!O1:R1`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [['Статус бота', badge, readable, heartbeat]] },
+    });
+    log.info('[report] bot-status badge updated.');
+  } catch (e) {
+    log.warn('[report] bot-status write failed: ' + e.message);
+  }
 }

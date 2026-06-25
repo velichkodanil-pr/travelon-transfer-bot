@@ -5,7 +5,7 @@ import { log } from './logger.js';
 import { wasSent, markSent } from './store.js';
 import { notify, notifyEnabled } from './notify.js';
 import { runBulgaria } from './bulgaria.js';
-import { reportEnabled, upsertRows } from './report.js';
+import { reportEnabled, upsertRows, writeBotStatus } from './report.js';
 
 export async function runCycle() {
   const startedAt = new Date();
@@ -107,6 +107,7 @@ export async function runCycle() {
 
   // --- Google Sheet tracker (best-effort; never breaks the cycle) ----------
   if (reportEnabled()) {
+    await writeBotStatus(); // пульс + бейдж «БОТ АКТИВНИЙ» — щоциклу, незалежно від рядків
     try {
       // Generic-flow rows (Greece/Albania/Croatia/Spain): id, country, creation
       // date + the outcome derived from the summary buckets. These countries

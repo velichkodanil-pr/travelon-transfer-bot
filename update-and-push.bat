@@ -8,7 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 git add .
-git commit -m "Fix: never take the agent's own number (booking Telephone) as tourist phone; exclude it from comments/chat/Eline; strict UA phone validation"
+git commit -m "Report: bot-status badge in Google Sheet (green active / red inactive, auto-flips after 90 min)"
 git push
 
 echo.
