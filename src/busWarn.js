@@ -109,8 +109,7 @@ export async function runBusWarn(travelon) {
         await travelon.sendChatMessage({
           department: config.busWarn.department,
           subject: config.busWarn.subject,
-          text: null,
-          fallbackText: BUSWARN_TEXT,
+          text: BUSWARN_TEXT,
         });
         summary.warned.push(c.id);
         sends += 1;

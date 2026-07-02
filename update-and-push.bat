@@ -8,7 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 git add .
-git commit -m "Add bus-seating warning flow (Itravel/E.Line/RIKI transport, check-in today+, all statuses except Canceled)"
+git commit -m "Bus warning: send text deterministically (fix: auto-fill path posted nothing)"
 git push
 
 echo.
