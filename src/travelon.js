@@ -403,18 +403,30 @@ export class TravelonClient {
     await subj.selectOption({ label: subject }).catch(async () => {
       await subj.selectOption({ label: new RegExp(subject, 'i') });
     });
-    await this.page.waitForTimeout(500); // subject may auto-fill a template
+    // Some subjects' onChange auto-fills OR CLEARS the textarea asynchronously
+    // (e.g. subject "Попередження автобусній заявці" clears it). Let that settle
+    // BEFORE we fill, then fill with retries so a late clear can't clobber us.
+    await this.page.waitForTimeout(1500);
 
-    // 3) Text: if `text` is given, replace the auto-filled template with it.
-    //    If `text` is empty (template-only messages, e.g. the bus warning), keep
-    //    the subject's auto-filled template; if that is empty, use fallbackText.
+    // 3) Set the message text.
+    const desired = (text || fallbackText || '').toString();
     await area.click().catch(() => {});
-    if (text) {
-      await area.fill('');
-      await area.fill(text);
+    if (desired) {
+      for (let i = 0; i < 3; i++) {
+        await area.fill('');
+        await area.fill(desired);
+        await this.page.waitForTimeout(350);
+        if (((await area.inputValue().catch(() => '')) || '').trim() === desired.trim()) break;
+      }
     } else {
       const cur = (await area.inputValue().catch(() => '')) || '';
       if (!cur.trim() && fallbackText) await area.fill(fallbackText);
+    }
+    // Never send (and never mark "sent") with an empty composer.
+    const beforeSend = (await area.inputValue().catch(() => '')) || '';
+    if (!beforeSend.trim()) {
+      await this.screenshot('composer-empty-before-send');
+      throw new Error('Composer text empty before send — aborting (not marking sent).');
     }
 
     // 4) Recipient. "To everyone" is selected by default, so only act when we need
@@ -434,7 +446,16 @@ export class TravelonClient {
     await send.click({ timeout: 6000 }).catch(async () => {
       await send.click({ timeout: 3000, force: true });
     });
-    await this.page.waitForTimeout(1500);
+    await this.page.waitForTimeout(1800);
+    // A successful send CLEARS the composer. If our exact text is still there, it
+    // did NOT post — screenshot + throw so it is not falsely recorded as sent.
+    const remaining = ((await area.inputValue().catch(() => '')) || '').trim();
+    if (remaining && remaining === beforeSend.trim()) {
+      // Diagnostic only (no throw): avoids false failures if TravelON keeps the
+      // composer populated after a successful send.
+      await this.screenshot('composer-send-not-posted');
+      log.warn('[chat] composer not cleared after send — message may not have posted.');
+    }
     return true;
   }
 

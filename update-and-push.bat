@@ -8,7 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 git add .
-git commit -m "Bus warning: send text deterministically (fix: auto-fill path posted nothing)"
+git commit -m "Chat send: settle subject onChange + retry-fill text + verify non-empty (fix: subject 87 cleared box, sent empty)"
 git push
 
 echo.
