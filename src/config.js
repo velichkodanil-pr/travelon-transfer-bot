@@ -61,6 +61,8 @@ export const config = {
   bulgaria: {
     enabled: bool(process.env.BG_ENABLED, true),
     country: process.env.BG_COUNTRY || 'Болгарія',
+    // Contact-request flow now covers several countries (same bus suppliers).
+    countries: list(process.env.BG_COUNTRIES, ['Болгарія', 'Туреччина']),
     statuses: list(process.env.BG_STATUSES, ['Confirmed', 'Confirmed Print']),
     elineProviderName: process.env.BG_ELINE_PROVIDER || 'E.Line Tour',
     // `writeToEline`: push the phone into the Eline portal (E.Line only).
@@ -76,6 +78,12 @@ export const config = {
         name: process.env.BG_ELINE_PROVIDER || 'E.Line Tour',
         partnerId: process.env.BG_ELINE_PARTNER_ID || '1259',
         writeToEline: true,
+      },
+      {
+        name: process.env.BG_RIKI_PROVIDER || 'RIKI - A (Bus)',
+        partnerId: process.env.BG_RIKI_PARTNER_ID || '6892',
+        writeToEline: false,
+        messageItravel: false,
       },
     ],
     statusIds: list(process.env.BG_STATUS_IDS, ['2', '3']),

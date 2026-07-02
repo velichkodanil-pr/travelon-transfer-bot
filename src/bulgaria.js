@@ -72,7 +72,8 @@ function parseBulgariaRow(row, supplier, checkinFrom) {
   const flat = row.text || '';
   const idM = flat.match(/\b(\d{5})\b/);
   if (!idM) return null;
-  if (!new RegExp(config.bulgaria.country, 'i').test(flat)) return null;
+  const country = config.bulgaria.countries.find((c) => new RegExp(c, 'i').test(flat));
+  if (!country) return null;
   if (!row.status || !config.bulgaria.statuses.includes(row.status)) return null;
   const ci = ddmmyyyyToISO(row.checkin);
   if (!ci || ci < checkinFrom) return null;
@@ -91,6 +92,7 @@ function parseBulgariaRow(row, supplier, checkinFrom) {
   }
   return {
     id: idM[1],
+    country,
     supplier: supplier.name,
     writeToEline: supplier.writeToEline,
     messageItravel: supplier.messageItravel || false,
@@ -153,7 +155,7 @@ export async function runBulgaria(travelon) {
   const mkRow = (c, o = {}) => ({
     bookingId: c.id,
     elineRef: c.supplierRef || c.elineNum || '',
-    country: config.bulgaria.country,
+    country: c.country || config.bulgaria.countries[0] || '',
     bookingDate: c.bookingDateISO || '',
     checkinDate: c.checkinISO || '',
     phonePresent: '',
@@ -189,7 +191,7 @@ export async function runBulgaria(travelon) {
       const ids = rows.map((r) => (r.text.match(/\b(\d{5})\b/) || [])[1]).filter(Boolean);
       if (page === 1) {
         const bgRows = rows.filter((r) =>
-          new RegExp(config.bulgaria.country, 'i').test(r.text || '')
+          config.bulgaria.countries.some((c) => new RegExp(c, 'i').test(r.text || ''))
         );
         const sample = bgRows
           .slice(0, 4)
