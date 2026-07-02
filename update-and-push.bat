@@ -8,7 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 git add .
-git commit -m "Report: bot-status badge in Google Sheet (green active / red inactive, auto-flips after 90 min)"
+git commit -m "Add bus-seating warning flow (Itravel/E.Line/RIKI transport, check-in today+, all statuses except Canceled)"
 git push
 
 echo.

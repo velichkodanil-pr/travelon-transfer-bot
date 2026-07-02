@@ -24,6 +24,13 @@ function todayISOInTz(tz) {
   return parts; // en-CA gives YYYY-MM-DD
 }
 
+// YYYY-MM-DD for (today - days) in the given timezone. days=0 => today.
+function dateMinusDaysISO(tz, days) {
+  const d = new Date(todayISOInTz(tz) + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - (Number(days) || 0));
+  return d.toISOString().slice(0, 10);
+}
+
 // "17.06.2026 15:20:23" or "17.06.2026" -> "2026-06-17"
 function ddmmyyyyToISO(d) {
   const m = d.match(/(\d{2})\.(\d{2})\.(\d{4})/);
@@ -201,6 +208,8 @@ export class TravelonClient {
 
   async listMatchingBookings() {
     const today = todayISOInTz(config.tz);
+    // Earliest creation date in scope = today minus LOOKBACK_DAYS.
+    const cutoff = dateMinusDaysISO(config.tz, config.lookbackDays);
 
     // Pull each row's flat text + its STATUS label in one pass. The status is the
     // text just before "Room status" in the row's status cell (e.g. the cell reads
@@ -238,9 +247,9 @@ export class TravelonClient {
       const country = COUNTRY_RE.find((c) => c.re.test(flat));
       if (!country) continue;
 
-      // Creation date must be today or later (when ONLY_TODAY=true).
+      // Creation date must be within the last LOOKBACK_DAYS days (ONLY_TODAY=true).
       const iso = ddmmyyyyToISO(dateMatch[1]);
-      if (config.onlyToday && (!iso || iso < today)) continue;
+      if (config.onlyToday && (!iso || iso < cutoff)) continue;
 
       // Status must EXACTLY match one of the target statuses (e.g. "Confirmed",
       // "Confirmed Print"). This excludes "In Work", "Not Confirmed", etc.
@@ -370,7 +379,7 @@ export class TravelonClient {
   // The composer is a JS modal: the department <select> is present first; the SUBJECT
   // <select> renders only AFTER a department is chosen; Send enables once department +
   // subject + text are all set. "To everyone" is the default recipient.
-  async sendChatMessage({ department, subject, text, audience = 'everyone' }) {
+  async sendChatMessage({ department, subject, text, audience = 'everyone', fallbackText }) {
     const dept = await this.firstExisting(sel.chat.departmentSelect, { timeout: 6000 });
     const area = await this.firstExisting(sel.chat.textArea, { timeout: 3000 });
     if (!dept || !area) {
@@ -396,10 +405,17 @@ export class TravelonClient {
     });
     await this.page.waitForTimeout(500); // subject may auto-fill a template
 
-    // 3) Write our exact text, replacing any auto-filled template.
+    // 3) Text: if `text` is given, replace the auto-filled template with it.
+    //    If `text` is empty (template-only messages, e.g. the bus warning), keep
+    //    the subject's auto-filled template; if that is empty, use fallbackText.
     await area.click().catch(() => {});
-    await area.fill('');
-    await area.fill(text);
+    if (text) {
+      await area.fill('');
+      await area.fill(text);
+    } else {
+      const cur = (await area.inputValue().catch(() => '')) || '';
+      if (!cur.trim() && fallbackText) await area.fill(fallbackText);
+    }
 
     // 4) Recipient. "To everyone" is selected by default, so only act when we need
     //    administrators (clicking the already-active toggle could clear it).
@@ -526,6 +542,46 @@ export class TravelonClient {
           form.submit();
         },
         { partnerId, statusIds }
+      ),
+    ]);
+    await this.page.waitForTimeout(2500);
+  }
+
+  // Bus-warning filter: like applyBulgariaSupplierFilter but restrict CHECK-IN to
+  // `checkinFrom` (DD.MM.YYYY) onwards, so only upcoming trips come back.
+  async applyBusFilter(partnerId, statusIds, checkinFrom) {
+    await this.page.goto(config.requestsUrl, { waitUntil: 'domcontentloaded' });
+    await this.page.waitForTimeout(1500);
+    await Promise.all([
+      this.page
+        .waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 })
+        .catch(() => {}),
+      this.page.evaluate(
+        ({ partnerId, statusIds, checkinFrom }) => {
+          const form =
+            document.querySelector('form[action="/book/bundle/index"]') ||
+            document.querySelector('form');
+          if (!form) return;
+          const partner = form.querySelector('select[name="filter[partner_id]"]');
+          if (partner) partner.value = partnerId;
+          const st = form.querySelector('select[name="filter[status_ids][]"]');
+          if (st)
+            Array.from(st.options).forEach((o) => (o.selected = statusIds.includes(o.value)));
+          const mkt = form.querySelector('select[name="filter[market_state_ids][]"]');
+          if (mkt) Array.from(mkt.options).forEach((o) => (o.selected = false));
+          const sv = form.querySelector('[name="filter[search]"]');
+          if (sv) sv.value = '';
+          const fe = form.querySelector('[name="filter[from_entry]"]');
+          if (fe) fe.value = checkinFrom;
+          ['filter[from_order]', 'filter[to_order]', 'filter[to_entry]', 'filter[from_exit]', 'filter[to_exit]'].forEach(
+            (n) => {
+              const el = form.querySelector(`[name="${n}"]`);
+              if (el) el.value = '';
+            }
+          );
+          form.submit();
+        },
+        { partnerId, statusIds, checkinFrom }
       ),
     ]);
     await this.page.waitForTimeout(2500);

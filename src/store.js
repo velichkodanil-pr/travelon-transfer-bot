@@ -71,3 +71,31 @@ export async function setWatch(bookingId, patch) {
     log.warn('Could not persist watch-store (continuing):', err.message);
   }
 }
+
+// --- Bus-warning per-booking state (data/busWarn.json): { [id]: { warnedAt } } ---
+const BUSWARN_FILE = path.join(config.dataDir, 'busWarn.json');
+
+export async function loadBusWarn() {
+  try {
+    return JSON.parse(await fs.readFile(BUSWARN_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+export async function getBusWarn(bookingId) {
+  const w = await loadBusWarn();
+  return w[String(bookingId)] || null;
+}
+
+export async function setBusWarn(bookingId, patch) {
+  try {
+    await ensureDir();
+    const w = await loadBusWarn();
+    const key = String(bookingId);
+    w[key] = { ...(w[key] || {}), ...patch };
+    await fs.writeFile(BUSWARN_FILE, JSON.stringify(w, null, 2), 'utf8');
+  } catch (err) {
+    log.warn('Could not persist busWarn-store (continuing):', err.message);
+  }
+}

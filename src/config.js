@@ -43,6 +43,9 @@ export const config = {
   ]),
   targetStatuses: list(process.env.TARGET_STATUSES, ['Confirmed', 'Confirmed Print']),
   onlyToday: bool(process.env.ONLY_TODAY, true),
+  // When onlyToday is on, still process bookings created within the last N days
+  // (not just today) — catches ones created a day earlier but confirmed later.
+  lookbackDays: num(process.env.LOOKBACK_DAYS, 3),
 
   // --- message ---
   message: {
@@ -135,6 +138,25 @@ export const config = {
     refreshToken: process.env.GOOGLE_OAUTH_REFRESH_TOKEN || '',
   },
 
+  // --- bus-seating warning (Itravel / E.Line Tour / RIKI - A (Bus)) ---
+  busWarn: {
+    enabled: bool(process.env.BUSWARN_ENABLED, true),
+    department: process.env.BUSWARN_DEPARTMENT || 'Бронювання',
+    subject: process.env.BUSWARN_SUBJECT || 'Попередження автобусній заявці',
+    // Every status EXCEPT Canceled (id 5): New=6, In Work=1, Confirmed=2,
+    // Confirmed Print=3, Not Confirmed=4, Not Confirmed From Site=7.
+    statusIds: list(process.env.BUSWARN_STATUS_IDS, ['6', '1', '2', '3', '4', '7']),
+    maxListPages: num(process.env.BUSWARN_MAX_PAGES, 15),
+    // Safety: cap actual sends per cycle so the first LIVE run can't flood agents;
+    // the rest are picked up on the next cycles.
+    maxSendsPerRun: num(process.env.BUSWARN_MAX_SENDS_PER_RUN, 40),
+    suppliers: [
+      { name: 'Itravel', partnerId: process.env.BG_ITRAVEL_PARTNER_ID || '6572' },
+      { name: 'E.Line Tour', partnerId: process.env.BG_ELINE_PARTNER_ID || '1259' },
+      { name: 'RIKI - A (Bus)', partnerId: process.env.BUSWARN_RIKI_PARTNER_ID || '6892' },
+    ],
+  },
+
   logLevel: (process.env.LOG_LEVEL || 'info').toLowerCase(),
 };
 
@@ -160,6 +182,17 @@ export const PHONE_CANDIDATE_RE = /\+?\d[\d \t.() -]{6,20}\d/g;
 
 export const BG_ASK_PATTERNS = [/перевізник/i, /контакт.*турист.*перевізник/i];
 export const BG_REMINDER_PATTERNS = [/нагадуємо.*контакт/i, /нагадуємо.*воді/i];
+
+// Bus-seating warning: fallback text (used only if the subject's auto-filled
+// template comes up empty) + patterns that mean the warning is ALREADY in a chat.
+export const BUSWARN_TEXT =
+  'Шановні колеги! Звертаємо вашу увагу, що під час бронювання автобусних перевезень туроператор не може гарантувати збереження конкретно обраних місць у салоні автобуса, якщо такі місця були попередньо обрані пасажирами. Це пов\'язано з тим, що перевізник може змінити транспортний засіб перед рейсом або безпосередньо в день виїзду. Така заміна можлива з технічних причин, у зв\'язку зі зміною моделі автобуса на маршруті або через інші обставини, що не залежать від туроператора. У разі заміни автобуса схема салону може відрізнятися від початкової, зокрема: * може бути інша кількість рядів; * може змінюватися розташування проходів, дверей або місць; * нумерація сидінь може не відповідати попередній схемі; * кількість або тип сидінь може відрізнятися залежно від моделі автобуса; * наявність додаткових зручностей, таких як розетки, столики або регульовані крісла, також може відрізнятися. У зв\'язку з цим заброньоване місце розглядається як побажання пасажира, але не як гарантована умова перевезення. Маршрутний лист надається за добу до виїзду після 18:00 та буде доступний у прикріплених документах до заявки. Дякуємо за розуміння.';
+
+export const BUSWARN_PATTERNS = [
+  /Попередження автобусн/i,
+  /гарантувати збереження конкретно обраних місць/i,
+  /Маршрутний лист надається за добу до виїзду/i,
+];
 
 // ----------------------------------------------------------------------------
 // SELECTORS — verify/fix against the live DOM with: npm run codegen.

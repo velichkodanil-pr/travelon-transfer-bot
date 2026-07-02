@@ -5,6 +5,7 @@ import { log } from './logger.js';
 import { wasSent, markSent } from './store.js';
 import { notify, notifyEnabled } from './notify.js';
 import { runBulgaria } from './bulgaria.js';
+import { runBusWarn } from './busWarn.js';
 import { reportEnabled, upsertRows, writeBotStatus } from './report.js';
 
 export async function runCycle() {
@@ -19,6 +20,7 @@ export async function runCycle() {
     errors: [],
   };
   let bg = null;
+  let bw = null;
   let bookings = []; // hoisted so the report step (after the cycle) can see it
 
   const client = new TravelonClient();
@@ -81,6 +83,11 @@ export async function runCycle() {
     if (config.bulgaria.enabled) {
       bg = await runBulgaria(client);
     }
+
+    // Bus-seating warning — reuses the same logged-in TravelON session.
+    if (config.busWarn.enabled) {
+      bw = await runBusWarn(client);
+    }
   } catch (err) {
     summary.errors.push(`cycle: ${err.message}`);
     log.error('Cycle failed:', err.message);
@@ -102,6 +109,7 @@ export async function runCycle() {
   ];
   let report = lines.join('\n');
   if (bg && bg.report) report += '\n\n' + bg.report;
+  if (bw && bw.report) report += '\n\n' + bw.report;
   log.info('Cycle summary:\n' + report);
   if (notifyEnabled()) await notify(report);
 
