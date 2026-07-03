@@ -141,6 +141,7 @@ export const config = {
     enabled: bool(process.env.REPORT_ENABLED, false),
     spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID || '',
     sheetName: process.env.GOOGLE_SHEETS_TAB || '',
+    busWarnTab: process.env.GOOGLE_SHEETS_BUSWARN_TAB || 'Автобусні попередження',
     clientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
     clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET || '',
     refreshToken: process.env.GOOGLE_OAUTH_REFRESH_TOKEN || '',

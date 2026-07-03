@@ -27,6 +27,13 @@ function ddmmyyyyToISO(s) {
   const m = s && s.match(/(\d{2})\.(\d{2})\.(\d{4})/);
   return m ? `${m[3]}-${m[2]}-${m[1]}` : null;
 }
+const BW_COUNTRIES = [
+  'Болгарія', 'Туреччина', 'Греція', 'Албанія', 'Хорватія', 'Іспанія',
+  'Чорногорія', 'Єгипет', 'Кіпр', 'Італія', 'Туніс', 'Грузія', 'Молдова',
+];
+function countryOf(text) {
+  return BW_COUNTRIES.find((c) => new RegExp(c, 'i').test(text || '')) || '';
+}
 
 export async function runBusWarn(travelon) {
   const summary = {
@@ -35,6 +42,7 @@ export async function runBusWarn(travelon) {
     alreadyInChat: [],
     skippedDone: [],
     errors: [],
+    rows: [], // per-booking rows for the Google Sheet "Автобусні попередження" tab
   };
   if (!config.busWarn.enabled) return summary;
 
@@ -74,7 +82,7 @@ export async function runBusWarn(travelon) {
         if (!ci || ci < tISO) continue; // check-in today or later
         if (seen.has(idM[1])) continue;
         seen.add(idM[1]);
-        candidates.push({ id: idM[1], supplier: sup.name, checkinISO: ci });
+        candidates.push({ id: idM[1], country: countryOf(r.text), supplier: sup.name, checkin: r.checkin || '', checkinISO: ci });
       }
     }
   }
@@ -83,11 +91,20 @@ export async function runBusWarn(travelon) {
 
   // 2) Warn each candidate once (capped per cycle in LIVE mode).
   let sends = 0;
+  const bwRow = (c, status, note = '') => ({
+    bookingId: c.id,
+    country: c.country || '',
+    supplier: c.supplier,
+    checkinDate: c.checkin || c.checkinISO || '',
+    status,
+    note,
+  });
   for (const c of candidates) {
     try {
       const w = await getBusWarn(c.id);
       if (w?.warnedAt && !config.dryRun) {
         summary.skippedDone.push(c.id);
+        summary.rows.push(bwRow(c, 'Надіслано раніше'));
         continue;
       }
       if (!config.dryRun && sends >= config.busWarn.maxSendsPerRun) {
@@ -98,6 +115,7 @@ export async function runBusWarn(travelon) {
       const chatText = await travelon.readChatPanelText();
       if (BUSWARN_PATTERNS.some((re) => re.test(chatText))) {
         summary.alreadyInChat.push(c.id);
+        summary.rows.push(bwRow(c, 'Вже в чаті'));
         if (!config.dryRun) await setBusWarn(c.id, { warnedAt: new Date().toISOString(), source: 'chat-existing' });
         await travelon.closeChat(c.id).catch(() => {});
         continue;
@@ -105,6 +123,7 @@ export async function runBusWarn(travelon) {
       if (config.dryRun) {
         summary.warned.push(`${c.id} (dry)`);
         log.info(`[BusWarn] ${c.id}: WOULD send bus warning (${c.supplier}).`);
+        summary.rows.push(bwRow(c, 'DRY-RUN: надіслав би', 'DRY-RUN'));
       } else {
         await travelon.sendChatMessage({
           department: config.busWarn.department,
@@ -115,12 +134,14 @@ export async function runBusWarn(travelon) {
         sends += 1;
         await setBusWarn(c.id, { warnedAt: new Date().toISOString(), source: 'sent' });
         log.info(`[BusWarn] ${c.id}: sent bus warning (${c.supplier}).`);
+        summary.rows.push(bwRow(c, 'Надіслано'));
       }
       await travelon.closeChat(c.id).catch(() => {});
     } catch (err) {
       summary.errors.push(`${c.id}: ${err.message}`);
       log.error(`[BusWarn] ${c.id} failed:`, err.message);
       await travelon.screenshot(`buswarn-${c.id}-error`);
+      summary.rows.push(bwRow(c, 'Помилка', err.message));
     }
   }
 

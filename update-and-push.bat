@@ -8,7 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 git add .
-git commit -m "Contact request now covers Bulgaria + Turkey (add RIKI supplier); + chat-send composer fix"
+git commit -m "Report: log bus warnings to a separate 'Автобусні попередження' tab (auto-created); remove false composer-not-posted alarm"
 git push
 
 echo.

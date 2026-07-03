@@ -447,15 +447,9 @@ export class TravelonClient {
       await send.click({ timeout: 3000, force: true });
     });
     await this.page.waitForTimeout(1800);
-    // A successful send CLEARS the composer. If our exact text is still there, it
-    // did NOT post — screenshot + throw so it is not falsely recorded as sent.
-    const remaining = ((await area.inputValue().catch(() => '')) || '').trim();
-    if (remaining && remaining === beforeSend.trim()) {
-      // Diagnostic only (no throw): avoids false failures if TravelON keeps the
-      // composer populated after a successful send.
-      await this.screenshot('composer-send-not-posted');
-      log.warn('[chat] composer not cleared after send — message may not have posted.');
-    }
+    // NOTE: TravelON does NOT clear the composer after a successful send, so we
+    // can't treat a non-empty box as failure — the pre-send non-empty check above
+    // is the safeguard against sending an empty message.
     return true;
   }
 

@@ -6,7 +6,7 @@ import { wasSent, markSent } from './store.js';
 import { notify, notifyEnabled } from './notify.js';
 import { runBulgaria } from './bulgaria.js';
 import { runBusWarn } from './busWarn.js';
-import { reportEnabled, upsertRows, writeBotStatus } from './report.js';
+import { reportEnabled, upsertRows, upsertBusWarnRows, writeBotStatus } from './report.js';
 
 export async function runCycle() {
   const startedAt = new Date();
@@ -156,6 +156,12 @@ export async function runCycle() {
       const res = await upsertRows([...genericRows, ...bgRows]);
       log.info(`Report: Google Sheet — ${res.updated} оновлено, ${res.appended} додано.`);
       report += `\nReport: Sheet +${res.appended} нових / ${res.updated} оновлено`;
+
+      if (bw && bw.rows && bw.rows.length) {
+        const bwRes = await upsertBusWarnRows(bw.rows);
+        log.info(`Report: BusWarn tab — ${bwRes.updated} оновлено, ${bwRes.appended} додано.`);
+        report += `\nBusWarn tab: +${bwRes.appended} / ${bwRes.updated}`;
+      }
     } catch (e) {
       log.warn('Report update failed (continuing): ' + e.message);
     }
