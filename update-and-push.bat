@@ -8,7 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 git add .
-git commit -m "Report: log bus warnings to a separate 'Автобусні попередження' tab (auto-created); remove false composer-not-posted alarm"
+git commit -m "Skip bookings whose DEPARTURE day is today or already past (contact + bus-warning flows); + bus-warning report tab; remove false composer-not-posted alarm"
 git push
 
 echo.

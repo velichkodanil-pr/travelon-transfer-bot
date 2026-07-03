@@ -623,7 +623,18 @@ export class TravelonClient {
           // "Date of request" (booking date) is column index 6.
           const bm = cells[6] ? norm(cells[6].innerText).match(/\d{2}\.\d{2}\.\d{4}/) : null;
           const bookingDate = bm ? bm[0] : '';
-          return { text, status, checkin, bookingDate };
+          // "Date of departure" (tour start) cell holds the transport schedule with
+          // a TIME RANGE, e.g. "03.07.2026 07:00 - 12:00". Identify that cell by the
+          // time-range pattern (so a shifted column index can't grab a wrong date),
+          // then take its FIRST date = the outbound departure (tour start).
+          const depCell = cells.find(
+            (td) =>
+              /\d{2}\.\d{2}\.\d{4}/.test(td.innerText || '') &&
+              /\d{1,2}:\d{2}\s*[-\u2013\u2014]\s*\d{1,2}:\d{2}/.test(td.innerText || '')
+          );
+          const dpm = depCell ? norm(depCell.innerText).match(/\d{2}\.\d{2}\.\d{4}/) : null;
+          const departure = dpm ? dpm[0] : '';
+          return { text, status, checkin, bookingDate, departure };
         })
       )
       .catch(() => []);

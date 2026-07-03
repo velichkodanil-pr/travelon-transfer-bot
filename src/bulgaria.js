@@ -77,6 +77,9 @@ function parseBulgariaRow(row, supplier, checkinFrom) {
   if (!row.status || !config.bulgaria.statuses.includes(row.status)) return null;
   const ci = ddmmyyyyToISO(row.checkin);
   if (!ci || ci < checkinFrom) return null;
+  // Не чіпаємо заявку, якщо день ВИЇЗДУ (початок туру) = сьогодні або вже минув.
+  const dep = ddmmyyyyToISO(row.departure);
+  if (dep && dep <= checkinCutoffISO(config.tz, 0)) return null;
   // E.Line bookings need their Eline reference (to update the portal); others don't.
   let elineNum = null;
   let supplierRef = null;

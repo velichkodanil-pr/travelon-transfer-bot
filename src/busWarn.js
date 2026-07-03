@@ -80,6 +80,8 @@ export async function runBusWarn(travelon) {
         if (r.status && /cancel/i.test(r.status)) continue; // exclude Canceled
         const ci = ddmmyyyyToISO(r.checkin);
         if (!ci || ci < tISO) continue; // check-in today or later
+        const dep = ddmmyyyyToISO(r.departure);
+        if (dep && dep <= tISO) continue; // виїзд сьогодні або раніше — не чіпаємо
         if (seen.has(idM[1])) continue;
         seen.add(idM[1]);
         candidates.push({ id: idM[1], country: countryOf(r.text), supplier: sup.name, checkin: r.checkin || '', checkinISO: ci });
