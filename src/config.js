@@ -63,7 +63,7 @@ export const config = {
     country: process.env.BG_COUNTRY || 'Болгарія',
     // Contact-request flow now covers several countries (same bus suppliers).
     countries: list(process.env.BG_COUNTRIES, ['Болгарія', 'Туреччина']),
-    statuses: list(process.env.BG_STATUSES, ['Confirmed', 'Confirmed Print']),
+    statuses: list(process.env.BG_STATUSES, ['Confirmed', 'Confirmed Print', 'New', 'In Work']),
     elineProviderName: process.env.BG_ELINE_PROVIDER || 'E.Line Tour',
     // `writeToEline`: push the phone into the Eline portal (E.Line only).
     // `messageItravel`: send the phone into the Itravel client cabinet (Itravel only).
@@ -86,7 +86,9 @@ export const config = {
         messageItravel: false,
       },
     ],
-    statusIds: list(process.env.BG_STATUS_IDS, ['2', '3']),
+    // Confirmed(2), Confirmed Print(3), New(6), In Work(1) — запит контакту тепер
+    // охоплює і нові/в-роботі заявки.
+    statusIds: list(process.env.BG_STATUS_IDS, ['2', '3', '6', '1']),
     checkinFromDays: num(process.env.BG_CHECKIN_FROM_DAYS, 1),
     createdFromISO: process.env.BG_CREATED_FROM || '2026-01-01',
     maxListPages: num(process.env.BG_MAX_LIST_PAGES, 20),

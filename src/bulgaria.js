@@ -74,7 +74,10 @@ function parseBulgariaRow(row, supplier, checkinFrom) {
   if (!idM) return null;
   const country = config.bulgaria.countries.find((c) => new RegExp(c, 'i').test(flat));
   if (!country) return null;
-  if (!row.status || !config.bulgaria.statuses.includes(row.status)) return null;
+  // Звірка статусу рядка — стійка до регістру/зайвих пробілів ("In Work"/"In work").
+  const _st = (row.status || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const _allowed = config.bulgaria.statuses.map((x) => x.toLowerCase().replace(/\s+/g, ' ').trim());
+  if (!_st || !_allowed.includes(_st)) return null;
   const ci = ddmmyyyyToISO(row.checkin);
   if (!ci || ci < checkinFrom) return null;
   // Не чіпаємо заявку, якщо день ВИЇЗДУ (початок туру) = сьогодні або вже минув.

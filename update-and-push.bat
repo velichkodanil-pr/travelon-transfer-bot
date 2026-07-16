@@ -8,7 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 git add .
-git commit -m "Skip bookings whose DEPARTURE day is today or already past (contact + bus-warning flows); + bus-warning report tab; remove false composer-not-posted alarm"
+git commit -m "Contact-request flow now also covers New + In Work bookings (statusIds 2,3,6,1); robust status match"
 git push
 
 echo.
