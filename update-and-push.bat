@@ -8,7 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 git add .
-git commit -m "Contact-request flow: cover bus suppliers (Itravel/E.Line/RIKI) in ALL countries, not just Bulgaria/Turkey (country is now a report label only)"
+git commit -m "New flow: insurance + RU/BY-citizen document request (dept Бронювання, template auto-fill); own dry-run flag (INSDOC_DRY_RUN, default true)"
 git push
 
 echo.

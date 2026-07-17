@@ -47,6 +47,30 @@ export const config = {
   // (not just today) — catches ones created a day earlier but confirmed later.
   lookbackDays: num(process.env.LOOKBACK_DAYS, 3),
 
+  // Insurance + RU/BY-citizen document request. For bookings that HAVE insurance
+  // (the list row shows an insurance marker) with any status except Canceled,
+  // created within lookbackDays, and where at least ONE passenger's Nationality is
+  // RUSSIA or BELARUS -> post a chat message (Department "Бронювання", Subject
+  // "Запит документів для громадянина рф/рб" whose TEMPLATE auto-fills the body).
+  // Nationality is only on the booking card, so we pre-filter the list to insurance
+  // rows and open only those. Has its OWN dry-run flag so it can observe-only while
+  // the rest of the bot is LIVE. Dedup: data/insDoc.json.
+  insuranceRuby: {
+    enabled: bool(process.env.INSDOC_ENABLED, true),
+    dryRun: bool(process.env.INSDOC_DRY_RUN, true),
+    department: process.env.INSDOC_DEPARTMENT || 'Бронювання',
+    subject: process.env.INSDOC_SUBJECT || 'Запит документів для громадянина рф/рб',
+    nationalities: list(process.env.INSDOC_NATIONALITIES, ['RUSSIA', 'BELARUS']),
+    // statuses: every one EXCEPT Canceled(5): New=6, In Work=1, Confirmed=2,
+    // Confirmed Print=3, Not Confirmed=4, Not Confirmed From Site=7.
+    statusIds: list(process.env.INSDOC_STATUS_IDS, ['6', '1', '2', '3', '4', '7']),
+    insuranceRe: process.env.INSDOC_INSURANCE_RE || 'insurance:|страхуванн',
+    lookbackDays: num(process.env.INSDOC_LOOKBACK_DAYS, 3),
+    maxListPages: num(process.env.INSDOC_MAX_LIST_PAGES, 6),
+    maxChecksPerRun: num(process.env.INSDOC_MAX_CHECKS_PER_RUN, 40),
+    maxSendsPerRun: num(process.env.INSDOC_MAX_SENDS_PER_RUN, 20),
+  },
+
   // --- message ---
   message: {
     department: process.env.MESSAGE_DEPARTMENT || 'Бронювання',

@@ -491,6 +491,28 @@ export class TravelonClient {
     return (await loc.inputValue().catch(() => '')) || '';
   }
 
+  // Read every passenger's Nationality (select[name="passenger[][nationality]"]).
+  // Values are country names, value === label ("UKRAINE" / "RUSSIA" / "BELARUS").
+  // The Passengers section can load collapsed — if no select is present yet, click
+  // "All sections" to render it, then read.
+  async readNationalities() {
+    const q = 'select[name="passenger[][nationality]"]';
+    let n = await this.page.locator(q).count().catch(() => 0);
+    if (n === 0) {
+      const all = this.page.getByText('All sections', { exact: true }).first();
+      if ((await all.count().catch(() => 0)) > 0) {
+        await all.click().catch(() => {});
+        await this.page.waitForTimeout(1200);
+      }
+      n = await this.page.locator(q).count().catch(() => 0);
+    }
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      out.push(((await this.page.locator(q).nth(i).inputValue().catch(() => '')) || '').trim());
+    }
+    return out;
+  }
+
   // Append the phone string to BOTH comment fields (if absent), then save.
   async appendPhonesToComments(phones, { dryRun }) {
     const phoneStr = phones.join(' ');

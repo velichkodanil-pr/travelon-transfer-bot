@@ -99,3 +99,31 @@ export async function setBusWarn(bookingId, patch) {
     log.warn('Could not persist busWarn-store (continuing):', err.message);
   }
 }
+
+// --- Insurance/RU-BY doc-request state (data/insDoc.json): { [id]: { checkedAt, sentAt, ruby } } ---
+const INSDOC_FILE = path.join(config.dataDir, 'insDoc.json');
+
+export async function loadInsDoc() {
+  try {
+    return JSON.parse(await fs.readFile(INSDOC_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+export async function getInsDoc(bookingId) {
+  const w = await loadInsDoc();
+  return w[String(bookingId)] || null;
+}
+
+export async function setInsDoc(bookingId, patch) {
+  try {
+    await ensureDir();
+    const w = await loadInsDoc();
+    const key = String(bookingId);
+    w[key] = { ...(w[key] || {}), ...patch };
+    await fs.writeFile(INSDOC_FILE, JSON.stringify(w, null, 2), 'utf8');
+  } catch (err) {
+    log.warn('Could not persist insDoc-store (continuing):', err.message);
+  }
+}

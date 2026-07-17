@@ -6,6 +6,7 @@ import { wasSent, markSent } from './store.js';
 import { notify, notifyEnabled } from './notify.js';
 import { runBulgaria } from './bulgaria.js';
 import { runBusWarn } from './busWarn.js';
+import { runInsuranceDoc } from './insuranceRuby.js';
 import { reportEnabled, upsertRows, upsertBusWarnRows, writeBotStatus } from './report.js';
 
 export async function runCycle() {
@@ -21,6 +22,7 @@ export async function runCycle() {
   };
   let bg = null;
   let bw = null;
+  let ins = null;
   let bookings = []; // hoisted so the report step (after the cycle) can see it
 
   const client = new TravelonClient();
@@ -88,6 +90,11 @@ export async function runCycle() {
     if (config.busWarn.enabled) {
       bw = await runBusWarn(client);
     }
+
+    // Insurance + RU/BY-citizen document request — reuses the logged-in session.
+    if (config.insuranceRuby.enabled) {
+      ins = await runInsuranceDoc(client);
+    }
   } catch (err) {
     summary.errors.push(`cycle: ${err.message}`);
     log.error('Cycle failed:', err.message);
@@ -110,6 +117,7 @@ export async function runCycle() {
   let report = lines.join('\n');
   if (bg && bg.report) report += '\n\n' + bg.report;
   if (bw && bw.report) report += '\n\n' + bw.report;
+  if (ins && ins.report) report += '\n\n' + ins.report;
   log.info('Cycle summary:\n' + report);
   if (notifyEnabled()) await notify(report);
 
