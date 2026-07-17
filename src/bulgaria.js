@@ -68,12 +68,21 @@ function shouldRemindNow(askedAtISO) {
 // Parse a list row for a given transfer supplier. Keeps Bulgaria bookings of the
 // target statuses whose CHECK-IN date (column 10) is on/after `checkinFrom`.
 // Booking/creation date is intentionally ignored.
+// Країни лише для МІТКИ у звіті (не фільтр). Розширений список поширених
+// напрямків; якщо не знайдено — мітка порожня, заявку все одно обробляємо.
+const ALL_CONTACT_COUNTRIES = [
+  'Болгарія', 'Туреччина', 'Греція', 'Албанія', 'Хорватія', 'Іспанія',
+  'Чорногорія', 'Єгипет', 'Кіпр', 'Італія', 'Туніс', 'Грузія', 'Молдова',
+  'Румунія', 'Сербія', 'Північна Македонія',
+];
+
 function parseBulgariaRow(row, supplier, checkinFrom) {
   const flat = row.text || '';
   const idM = flat.match(/\b(\d{5})\b/);
   if (!idM) return null;
-  const country = config.bulgaria.countries.find((c) => new RegExp(c, 'i').test(flat));
-  if (!country) return null;
+  // Країну визначаємо ЛИШЕ як мітку для звіту — за нею НЕ фільтруємо: контакт
+  // збираємо для автобусних заявок цих перевізників у БУДЬ-ЯКІЙ країні (як попередження).
+  const country = ALL_CONTACT_COUNTRIES.find((c) => new RegExp(c, 'i').test(flat)) || '';
   // Звірка статусу рядка — стійка до регістру/зайвих пробілів ("In Work"/"In work").
   const _st = (row.status || '').toLowerCase().replace(/\s+/g, ' ').trim();
   const _allowed = config.bulgaria.statuses.map((x) => x.toLowerCase().replace(/\s+/g, ' ').trim());
@@ -161,7 +170,7 @@ export async function runBulgaria(travelon) {
   const mkRow = (c, o = {}) => ({
     bookingId: c.id,
     elineRef: c.supplierRef || c.elineNum || '',
-    country: c.country || config.bulgaria.countries[0] || '',
+    country: c.country || '',
     bookingDate: c.bookingDateISO || '',
     checkinDate: c.checkinISO || '',
     phonePresent: '',

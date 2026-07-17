@@ -8,7 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 git add .
-git commit -m "Contact-request flow now also covers New + In Work bookings (statusIds 2,3,6,1); robust status match"
+git commit -m "Contact-request flow: cover bus suppliers (Itravel/E.Line/RIKI) in ALL countries, not just Bulgaria/Turkey (country is now a report label only)"
 git push
 
 echo.
