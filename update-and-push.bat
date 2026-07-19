@@ -8,7 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 git add .
-git commit -m "New flow: insurance + RU/BY-citizen document request (dept Бронювання, template auto-fill); own dry-run flag (INSDOC_DRY_RUN, default true)"
+git commit -m "Guard: validate STORED phones before publishing to the report or messaging Itravel (stale invalid numbers can never leak); sanitize on persist"
 git push
 
 echo.

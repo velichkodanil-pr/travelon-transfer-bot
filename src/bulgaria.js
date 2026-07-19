@@ -24,6 +24,10 @@ const DASH = '-';
 // formats). Prevents non-phones (e.g. a wrong 13-digit value in the Eline
 // portal field) from being mistaken for a tourist phone.
 const looksLikePhone = (v) => Boolean(normalizeUaPhone(v));
+// Санітайзер для ЗБЕРЕЖЕНИХ номерів: у стані бота можуть лишатися сміттєві
+// значення, записані ще до суворої валідації (напр. 2283019842534). Ніколи не
+// показуємо їх у звіті і не шлемо постачальнику.
+const validPhones = (arr) => (arr || []).filter((p) => Boolean(normalizeUaPhone(p)));
 
 function ddmmyyyyToISO(d) {
   const m = d && d.match(/(\d{2})\.(\d{2})\.(\d{4})/);
@@ -257,7 +261,9 @@ export async function runBulgaria(travelon) {
   };
   // Only persist watch state in LIVE mode (so DRY-RUN never pre-marks anything).
   const persist = async (id, patch) => {
-    if (!config.dryRun) await setWatch(id, patch);
+    // Ніколи не зберігаємо невалідні номери — інакше вони житимуть у стані вічно.
+    const clean = patch && patch.phones ? { ...patch, phones: validPhones(patch.phones) } : patch;
+    if (!config.dryRun) await setWatch(id, clean);
   };
   // Send the tourist phone(s) into the Itravel cabinet booking thread (dedup via the
   // thread itself + the watch store). Returns true once the booking is considered
@@ -297,9 +303,10 @@ export async function runBulgaria(travelon) {
         if (w?.doneAt && !config.dryRun) {
           // Backfill: this booking was completed before the Itravel-cabinet step
           // existed (or messaging failed earlier) — message the supplier now.
-          if (c.messageItravel && !w?.itravelMsgAt && w?.phones?.length) {
+          const storedPhones = validPhones(w?.phones);
+          if (c.messageItravel && !w?.itravelMsgAt && storedPhones.length) {
             try {
-              if (await messageItravelFor(c, w.phones, w)) {
+              if (await messageItravelFor(c, storedPhones, w)) {
                 await persist(c.id, { itravelMsgAt: new Date().toISOString() });
               }
             } catch (err) {
@@ -311,7 +318,7 @@ export async function runBulgaria(travelon) {
           summary.rows.push(
             mkRow(c, {
               phonePresent: 'так',
-              agentNumber: w.phones ? w.phones.join(' ') : '',
+              agentNumber: validPhones(w.phones).join(' '),
               writtenInBooking: 'так',
               writtenInEline: 'так',
               status: 'Зроблено (раніше)',
