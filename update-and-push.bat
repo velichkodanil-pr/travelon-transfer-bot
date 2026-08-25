@@ -7,8 +7,29 @@ REM ============================================================
 setlocal
 cd /d "%~dp0"
 
+REM --- Syntax gate: never push code that cannot even parse -----------------
+set "NODE=node"
+where node >nul 2>&1 || set "NODE=%ProgramFiles%\nodejs\node.exe"
+if not exist "%NODE%" if /i not "%NODE%"=="node" set "NODE=%LOCALAPPDATA%\Programs\nodejs\node.exe"
+echo Syntax check %DATE% %TIME% using "%NODE%"> syntax-check.txt
+set "SYNTAX_FAILED="
+for %%F in (src\*.js) do (
+  "%NODE%" --check "%%F" >> syntax-check.txt 2>&1 || set "SYNTAX_FAILED=1"
+)
+if defined SYNTAX_FAILED (
+  echo.
+  echo *** SYNTAX ERROR - NOTHING WAS PUSHED. See syntax-check.txt ***
+  echo SYNTAX FAILED>> syntax-check.txt
+  echo.
+  pause
+  endlocal
+  exit /b 1
+)
+echo SYNTAX OK>> syntax-check.txt
+echo Syntax OK - pushing...
+
 git add .
-git commit -m "CRITICAL: cycle watchdog - a hung Playwright call used to wedge the bot silently forever (running=true, every tick skipped). Now a 45-min deadline exits for a clean Railway restart"
+git commit -m "Verify the supplier actually received the phone: re-read Eline form + Itravel thread after writing; do not mark a booking done unless confirmed. Fix status badge #ERROR (locale-aware formula + plain-text fallback)"
 git push
 
 echo.

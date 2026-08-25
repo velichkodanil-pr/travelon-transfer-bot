@@ -123,11 +123,14 @@ function parseBulgariaRow(row, supplier, checkinFrom) {
   };
 }
 
+// Returns TRUE only when the phone is provably in the Eline portal (already
+// present, or written AND verified by re-reading the saved form). Callers must
+// not mark a booking done on a false result — it will be retried next cycle.
 async function writeToEline(booking, phones, summary, ensureEline, agentPhone) {
   if (!config.eline.email || !config.eline.password) {
     summary.errors.push(`${booking.id}: ELINE creds missing, portal step skipped`);
     log.warn(`[BG] ${booking.id}: Eline creds not set; cannot write portal #${booking.elineNum}.`);
-    return;
+    return false;
   }
   const eline = await ensureEline();
   await eline.openBooking(booking.elineNum);
@@ -142,16 +145,30 @@ async function writeToEline(booking, phones, summary, ensureEline, agentPhone) {
       )}] — not rewriting.`
     );
     summary.eline.push(`${booking.id}->#${booking.elineNum} already-present`);
-    return;
+    return true;
   }
   const res = await eline.writePassengerPhones(phones, { dryRun: config.dryRun });
-  const verb = config.dryRun ? 'WOULD set' : 'set';
+  if (config.dryRun) {
+    log.info(
+      `[BG] ${booking.id} Eline#${booking.elineNum}: WOULD set ${res.count} phone field(s) -> [${res.plan.join(', ')}]`
+    );
+    summary.eline.push(`${booking.id}->#${booking.elineNum}[${res.plan.join(',')}] (dry)`);
+    return false; // nothing actually written in dry-run
+  }
+  if (!res.verified) {
+    const why = res.error || `after save the portal shows [${(res.present || []).join(', ') || '—'}]`;
+    log.error(
+      `[BG] ${booking.id} Eline#${booking.elineNum}: WRITE NOT CONFIRMED (${why}) — will retry next cycle.`
+    );
+    summary.errors.push(`${booking.id}: Eline write NOT confirmed (${why})`);
+    summary.eline.push(`${booking.id}->#${booking.elineNum} FAILED`);
+    return false;
+  }
   log.info(
-    `[BG] ${booking.id} Eline#${booking.elineNum}: ${verb} ${res.count} phone field(s) -> [${res.plan.join(', ')}]`
+    `[BG] ${booking.id} Eline#${booking.elineNum}: set ${res.count} phone field(s) -> [${res.plan.join(', ')}] — verified in portal.`
   );
-  summary.eline.push(
-    `${booking.id}->#${booking.elineNum}[${res.plan.join(',')}]${res.wrote ? '' : ' (dry)'}`
-  );
+  summary.eline.push(`${booking.id}->#${booking.elineNum}[${res.plan.join(',')}] ok`);
+  return true;
 }
 
 export async function runBulgaria(travelon) {
@@ -286,6 +303,14 @@ export async function runBulgaria(travelon) {
       summary.itravel.push(`${c.id}=present`);
       return true;
     }
+    if (!config.dryRun && !res.verified) {
+      log.error(
+        `[Itravel] ${c.id} (order ${c.supplierRef}): MESSAGE NOT CONFIRMED in thread — will retry next cycle.`
+      );
+      summary.errors.push(`${c.id}: Itravel message NOT confirmed in cabinet thread`);
+      summary.itravel.push(`${c.id}->order${c.supplierRef} FAILED`);
+      return false;
+    }
     const verb = config.dryRun ? 'WOULD message' : 'messaged';
     log.info(`[Itravel] ${c.id} (order ${c.supplierRef}): ${verb} [${res.missing.join(', ')}]`);
     summary.itravel.push(
@@ -337,7 +362,9 @@ export async function runBulgaria(travelon) {
           (p) => p !== agentPhone
         );
         if (phones.length) {
-          if (c.writeToEline) await writeToEline(c, phones, summary, ensureEline, agentPhone);
+          const elineOk = c.writeToEline
+            ? await writeToEline(c, phones, summary, ensureEline, agentPhone)
+            : true;
           let itravelMsgAt = null;
           if (c.messageItravel) {
             try {
@@ -347,8 +374,11 @@ export async function runBulgaria(travelon) {
               log.error(`[Itravel] ${c.id} message failed:`, err.message);
             }
           }
+          // Only close the booking once the SUPPLIER provably has the phone.
+          const supplierOk =
+            config.dryRun || (elineOk && (!c.messageItravel || Boolean(itravelMsgAt)));
           await persist(c.id, {
-            doneAt: new Date().toISOString(),
+            ...(supplierOk ? { doneAt: new Date().toISOString() } : {}),
             phones,
             source: 'comments',
             ...(itravelMsgAt ? { itravelMsgAt } : {}),
@@ -361,10 +391,16 @@ export async function runBulgaria(travelon) {
               writtenInEline: c.writeToEline
                 ? config.dryRun
                   ? 'ні (вписав би)'
-                  : 'так'
+                  : elineOk
+                    ? 'так'
+                    : 'НІ — не підтверджено'
                 : 'не потрібно',
-              status: 'Зроблено',
-              note: [dryTag, `телефон уже в коментарях заявки (${c.supplier})`]
+              status: supplierOk ? 'Зроблено' : 'Помилка — постачальник не отримав',
+              note: [
+                dryTag,
+                `телефон уже в коментарях заявки (${c.supplier})`,
+                supplierOk ? '' : 'запис постачальнику не підтверджено — повтор наступного циклу',
+              ]
                 .filter(Boolean)
                 .join(' · '),
             })
@@ -387,7 +423,9 @@ export async function runBulgaria(travelon) {
               ', '
             )}] to both comment fields`
           );
-          if (c.writeToEline) await writeToEline(c, phones, summary, ensureEline, agentPhone);
+          const elineOk = c.writeToEline
+            ? await writeToEline(c, phones, summary, ensureEline, agentPhone)
+            : true;
           let itravelMsgAt = null;
           if (c.messageItravel) {
             try {
@@ -397,8 +435,11 @@ export async function runBulgaria(travelon) {
               log.error(`[Itravel] ${c.id} message failed:`, err.message);
             }
           }
+          // Only close the booking once the SUPPLIER provably has the phone.
+          const supplierOk =
+            config.dryRun || (elineOk && (!c.messageItravel || Boolean(itravelMsgAt)));
           await persist(c.id, {
-            doneAt: new Date().toISOString(),
+            ...(supplierOk ? { doneAt: new Date().toISOString() } : {}),
             phones,
             source: 'chat',
             ...(itravelMsgAt ? { itravelMsgAt } : {}),
@@ -411,10 +452,18 @@ export async function runBulgaria(travelon) {
               writtenInEline: c.writeToEline
                 ? config.dryRun
                   ? 'ні (вписав би)'
-                  : 'так'
+                  : elineOk
+                    ? 'так'
+                    : 'НІ — не підтверджено'
                 : 'не потрібно',
-              status: 'Зроблено',
-              note: [dryTag, `номер із чату агента (${c.supplier})`].filter(Boolean).join(' · '),
+              status: supplierOk ? 'Зроблено' : 'Помилка — постачальник не отримав',
+              note: [
+                dryTag,
+                `номер із чату агента (${c.supplier})`,
+                supplierOk ? '' : 'запис постачальнику не підтверджено — повтор наступного циклу',
+              ]
+                .filter(Boolean)
+                .join(' · '),
             })
           );
           continue;

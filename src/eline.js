@@ -92,20 +92,36 @@ export class ElineClient {
     return out;
   }
 
-  // Fill the per-passenger phone inputs. In dryRun, computes the plan but writes
-  // nothing. Returns { count, plan:[...], wrote }.
+  // Fill the per-passenger phone inputs, save, then RE-READ the form from the
+  // server to prove the number actually persisted.
+  // Returns { count, plan:[...], wrote, verified, present, error }.
+  // `verified` is the only field callers may treat as "the supplier really has it":
+  // fills and clicks can silently fail, so we never assume success.
   async writePassengerPhones(phones, { dryRun }) {
     const inputs = this.page.locator(sel.eline.passengerPhone);
     const count = await inputs.count().catch(() => 0);
-    if (count === 0) return { count: 0, plan: [], wrote: false };
+    if (count === 0)
+      return { count: 0, plan: [], wrote: false, verified: false, present: [], error: 'no phone inputs' };
     const plan = assignPhones(phones, count);
-    if (dryRun) return { count, plan, wrote: false };
+    if (dryRun) return { count, plan, wrote: false, verified: false, present: [] };
     for (let i = 0; i < count; i++) {
       await inputs.nth(i).fill(plan[i] ?? '').catch(() => {});
     }
     const save = this.page.locator(sel.eline.saveButton).filter({ hasText: /Зберегти|Save/i }).first();
-    if ((await save.count().catch(() => 0)) > 0) await save.click().catch(() => {});
+    if ((await save.count().catch(() => 0)) === 0) {
+      // No Save button -> nothing could have been persisted. Never claim success.
+      return { count, plan, wrote: false, verified: false, present: [], error: 'save button not found' };
+    }
+    await save.click().catch(() => {});
+    await this.page.waitForTimeout(2000);
+    // Reload so we read what the SERVER stored, not the values we just typed in.
+    await this.page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
     await this.page.waitForTimeout(1500);
-    return { count, plan, wrote: true };
+    const present = await this.readPassengerPhones();
+    const tail = (v) => String(v || '').replace(/\D+/g, '').slice(-9);
+    const want = plan.filter(Boolean).map(tail).filter((t) => t.length === 9);
+    const got = present.map(tail);
+    const verified = want.length > 0 && want.every((w) => got.includes(w));
+    return { count, plan, wrote: true, verified, present };
   }
 }

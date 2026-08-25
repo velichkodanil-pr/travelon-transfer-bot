@@ -280,26 +280,47 @@ export async function writeBotStatus() {
     const sheets = await getSheets();
     const tab = await resolveTab(sheets);
     let tz = config.tz;
+    let locale = 'en_US';
     try {
       const meta = await sheets.spreadsheets.get({
         spreadsheetId: r.spreadsheetId,
-        fields: 'properties.timeZone',
+        fields: 'properties.timeZone,properties.locale',
       });
       tz = meta.data.properties?.timeZone || config.tz;
+      locale = meta.data.properties?.locale || 'en_US';
     } catch {
       /* лишаємо config.tz */
     }
     const p = dateParts(new Date(), tz);
     const pad = (n) => String(n).padStart(2, '0');
     const readable = `оновлено ${pad(p.d)}.${pad(p.mo)}.${p.y} ${pad(p.h)}:${pad(p.mi)}`;
-    const heartbeat = `=DATE(${p.y},${p.mo},${p.d})+TIME(${p.h},${p.mi},${p.s})`;
-    const badge = '=IF((NOW()-$R$1)*1440<=90,"🟢 БОТ АКТИВНИЙ","🔴 БОТ НЕ АКТИВНИЙ")';
+    // Формули парсяться за ЛОКАЛЛЮ таблиці: у неанглійських локалях роздільник
+    // аргументів — ';', а не ','. Через це бейдж місяцями показував #ERROR! і
+    // «бот не активний» ніхто не бачив (див. інцидент 2026-08).
+    const sep = /^en/i.test(locale) ? ',' : ';';
+    const heartbeat = `=DATE(${p.y}${sep}${p.mo}${sep}${p.d})+TIME(${p.h}${sep}${p.mi}${sep}${p.s})`;
+    const badge = `=IF((NOW()-$R$1)*1440<=90${sep}"🟢 БОТ АКТИВНИЙ"${sep}"🔴 БОТ НЕ АКТИВНИЙ")`;
     await sheets.spreadsheets.values.update({
       spreadsheetId: r.spreadsheetId,
       range: `${tab}!O1:R1`,
       valueInputOption: 'USER_ENTERED',
       requestBody: { values: [['Статус бота', badge, readable, heartbeat]] },
     });
+    // Перевіряємо, що формула справді порахувалась. Якщо ні — пишемо простим
+    // текстом, щоб у клітинці НІКОЛИ не було #ERROR! замість статусу.
+    const check = await sheets.spreadsheets.values
+      .get({ spreadsheetId: r.spreadsheetId, range: `${tab}!P1` })
+      .catch(() => null);
+    const shown = String(check?.data?.values?.[0]?.[0] ?? '');
+    if (shown.startsWith('#')) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: r.spreadsheetId,
+        range: `${tab}!O1:R1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [['Статус бота', '🟢 БОТ АКТИВНИЙ', readable, readable]] },
+      });
+      log.warn(`[report] badge formula rejected by sheet locale "${locale}" — wrote plain text.`);
+    }
     log.info('[report] bot-status badge updated.');
   } catch (e) {
     log.warn('[report] bot-status write failed: ' + e.message);

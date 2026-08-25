@@ -156,8 +156,17 @@ export class ItravelClient {
     await send.click({ timeout: 5000 }).catch(async () => {
       await send.click({ timeout: 3000, force: true });
     });
-    await this.page.waitForTimeout(1500);
+    await this.page.waitForTimeout(2000);
+    // VERIFY: re-read the thread — a click can silently do nothing. Only report
+    // success when the phone is actually visible in the cabinet thread.
+    const after = await this.readThreadText();
+    const tail = (v) => String(v || '').replace(/\D+/g, '').slice(-9);
+    const posted = new Set(extractPhones(after).map(tail));
+    const verified = missing.every((p) => posted.has(tail(p)));
     await this.closeChat().catch(() => {});
-    return { sent: true, alreadyPresent: false, missing, text };
+    if (!verified) {
+      return { sent: false, verified: false, alreadyPresent: false, missing, text };
+    }
+    return { sent: true, verified: true, alreadyPresent: false, missing, text };
   }
 }
