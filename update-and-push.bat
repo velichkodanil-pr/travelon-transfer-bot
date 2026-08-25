@@ -8,7 +8,7 @@ setlocal
 cd /d "%~dp0"
 
 git add .
-git commit -m "Guard: validate STORED phones before publishing to the report or messaging Itravel (stale invalid numbers can never leak); sanitize on persist"
+git commit -m "CRITICAL: cycle watchdog - a hung Playwright call used to wedge the bot silently forever (running=true, every tick skipped). Now a 45-min deadline exits for a clean Railway restart"
 git push
 
 echo.

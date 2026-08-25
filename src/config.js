@@ -31,6 +31,13 @@ export const config = {
   dryRun: bool(process.env.DRY_RUN, true),
   checkCron: process.env.CHECK_CRON || '*/30 * * * *',
   runOnce: bool(process.env.RUN_ONCE, false),
+  // WATCHDOG: hard deadline for ONE cycle. A Playwright call that hangs (no
+  // timeout fires) used to wedge the bot forever: `running` stayed true, every
+  // later cron tick was skipped, and the service looked healthy while doing
+  // nothing. If a cycle exceeds this, we log and EXIT so Railway restarts the
+  // container with a clean browser.
+  // 45 min: a healthy full cycle runs ~20-30 min, so this only fires on a real hang.
+  cycleTimeoutMs: num(process.env.CYCLE_TIMEOUT_MIN, 45) * 60 * 1000,
   tz: process.env.CRON_TZ || 'Europe/Kyiv',
   maxSendsPerRun: num(process.env.MAX_SENDS_PER_RUN, 25),
 
