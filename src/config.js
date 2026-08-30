@@ -54,6 +54,20 @@ export const config = {
   // (not just today) — catches ones created a day earlier but confirmed later.
   lookbackDays: num(process.env.LOOKBACK_DAYS, 3),
 
+  // The generic 4-country flow used to scan ONLY the first list page (~50 newest
+  // bookings). Anything it missed — e.g. everything created while the bot was
+  // wedged 13-25.08.2026 — fell off page 1 and was never seen again (booking
+  // 67734, Іспанія, created 15.08, was never asked). Now it scans by CHECK-IN
+  // date with pagination, exactly like the bus flow, so a miss self-heals.
+  generic: {
+    statusIds: list(process.env.GENERIC_STATUS_IDS, ['2', '3']), // Confirmed, Confirmed Print
+    checkinFromDays: num(process.env.GENERIC_CHECKIN_FROM_DAYS, 1), // заїзд від завтра
+    maxListPages: num(process.env.GENERIC_MAX_LIST_PAGES, 20),
+    // Do NOT touch the pre-existing backlog: only bookings CREATED on/after this
+    // date are eligible. Everything older stays for the managers to close by hand.
+    createdFromISO: process.env.GENERIC_CREATED_FROM || '2026-08-30',
+  },
+
   // Insurance + RU/BY-citizen document request. For bookings that HAVE insurance
   // (the list row shows an insurance marker) with any status except Canceled,
   // created within lookbackDays, and where at least ONE passenger's Nationality is

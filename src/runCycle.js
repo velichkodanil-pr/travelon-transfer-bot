@@ -30,11 +30,15 @@ export async function runCycle() {
     await client.init();
     await client.login();
     await client.openRequests();
-    await client.clearCheckInDates();
-    await client.setStatusFilter();
-    await client.applyFilter();
 
-    bookings = await client.listMatchingBookings();
+    // Scan by CHECK-IN date with pagination (not "first page of newest bookings"),
+    // so a booking missed while the bot was down is still picked up afterwards.
+    bookings = await client.listUpcomingMatching({
+      statusIds: config.generic.statusIds,
+      checkinFromDays: config.generic.checkinFromDays,
+      maxPages: config.generic.maxListPages,
+      createdFromISO: config.generic.createdFromISO,
+    });
     summary.matched = bookings.map((b) => `${b.id}/${b.country}`);
 
     let sends = 0;

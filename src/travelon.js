@@ -272,6 +272,62 @@ export class TravelonClient {
     return out;
   }
 
+  // Generic 4-country scan by CHECK-IN date, with pagination.
+  // Replaces the old first-page-only, creation-date scan: that could only ever
+  // see the ~50 newest bookings, so anything missed (e.g. during downtime) was
+  // invisible forever. Filtering by check-in means an unasked upcoming trip
+  // keeps showing up until it is handled. `createdFromISO` keeps the historical
+  // backlog out of scope.
+  async listUpcomingMatching({ statusIds, checkinFromDays, maxPages, createdFromISO }) {
+    const fromISO = dateMinusDaysISO(config.tz, -Math.abs(Number(checkinFromDays) || 1));
+    const [y, m, d] = fromISO.split('-');
+    const checkinFrom = `${d}.${m}.${y}`;
+    log.info(
+      `Generic scan: check-in >= ${checkinFrom}, statuses [${statusIds.join(',')}], created >= ${createdFromISO || '—'}`
+    );
+    await this.applyBusFilter('', statusIds, checkinFrom);
+
+    const out = [];
+    const seen = new Set();
+    let prevFirst = null;
+    for (let page = 1; page <= maxPages; page++) {
+      if (page > 1) {
+        await this.page
+          .goto(`${config.requestsUrl}?page=${page}`, { waitUntil: 'domcontentloaded' })
+          .catch(() => {});
+        await this.page.waitForTimeout(2000);
+      }
+      const rows = await this.scanRows();
+      if (!rows.length) break;
+      const firstId = (rows[0].text.match(/\b(\d{5})\b/) || [])[1] || null;
+      if (firstId && firstId === prevFirst) break; // same page again -> no more pages
+      prevFirst = firstId;
+      for (const r of rows) {
+        const idM = (r.text || '').match(/\b(\d{5})\b/);
+        if (!idM) continue;
+        const id = idM[1];
+        if (seen.has(id)) continue;
+        const country = COUNTRY_RE.find((c) => c.re.test(r.text || ''));
+        if (!country) continue;
+        if (!r.status || !config.targetStatuses.includes(r.status)) continue;
+        const createdISO = ddmmyyyyToISO(r.bookingDate);
+        if (createdFromISO && createdISO && createdISO < createdFromISO) continue;
+        seen.add(id);
+        out.push({
+          id,
+          country: country.name,
+          status: r.status,
+          dateISO: createdISO || '',
+          dateRaw: r.bookingDate || '',
+        });
+      }
+    }
+    log.info(
+      `Matched ${out.length} booking(s): ${out.map((b) => `${b.id}[${b.status}]`).join(', ') || '—'}`
+    );
+    return out;
+  }
+
   // --- chat -----------------------------------------------------------------
 
   rowLocatorById(id) {

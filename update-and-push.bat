@@ -29,7 +29,7 @@ echo SYNTAX OK>> syntax-check.txt
 echo Syntax OK - pushing...
 
 git add .
-git commit -m "Verify the supplier actually received the phone: re-read Eline form + Itravel thread after writing; do not mark a booking done unless confirmed. Fix status badge #ERROR (locale-aware formula + plain-text fallback)"
+git commit -m "Generic 4-country flow: scan by CHECK-IN date with pagination instead of only the first page of newest bookings, so a booking missed during downtime (e.g. 67734) is picked up later; GENERIC_CREATED_FROM keeps the old backlog out of scope"
 git push
 
 echo.
