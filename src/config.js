@@ -90,6 +90,11 @@ export const config = {
     askedRe: process.env.INSDOC_ASKED_RE || '',
     insuranceRe: process.env.INSDOC_INSURANCE_RE || 'insurance:|страхуванн',
     lookbackDays: num(process.env.INSDOC_LOOKBACK_DAYS, 3),
+    // Absolute floor: consider ONLY bookings created on/after this date (Danylo
+    // 2026-08-30: "постав всі заявки від сьогодні"). Overrides lookbackDays when set —
+    // a booking created today is still picked up days later, once it turns Confirmed,
+    // while the old backlog stays out of scope forever.
+    createdFromISO: process.env.INSDOC_CREATED_FROM || '2026-08-30',
     maxListPages: num(process.env.INSDOC_MAX_LIST_PAGES, 6),
     maxChecksPerRun: num(process.env.INSDOC_MAX_CHECKS_PER_RUN, 40),
     maxSendsPerRun: num(process.env.INSDOC_MAX_SENDS_PER_RUN, 20),

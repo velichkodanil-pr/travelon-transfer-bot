@@ -61,7 +61,10 @@ export async function runInsuranceDoc(travelon) {
   if (!cfg.enabled) return summary;
 
   const dry = cfg.dryRun;
-  const cutoff = dateMinusDaysISO(config.tz, cfg.lookbackDays);
+  // The absolute floor (INSDOC_CREATED_FROM) wins over the rolling lookback window.
+  const cutoff = /^\d{4}-\d{2}-\d{2}$/.test(cfg.createdFromISO || '')
+    ? cfg.createdFromISO
+    : dateMinusDaysISO(config.tz, cfg.lookbackDays);
   const insRe = new RegExp(cfg.insuranceRe, 'i');
   const wantNat = cfg.nationalities.map((x) => x.toUpperCase());
   const askedPatterns = cfg.askedRe ? [new RegExp(cfg.askedRe, 'i')] : INSDOC_ASKED_PATTERNS;
@@ -115,7 +118,11 @@ export async function runInsuranceDoc(travelon) {
     if (older >= rows.length) break;
   }
   summary.matched = candidates.map((c) => c.id);
-  log.info(`[InsDoc] insurance candidates (<= ${cfg.lookbackDays}d): ${summary.matched.join(', ') || DASH}`);
+  log.info(
+    `[InsDoc] candidates (created >= ${cutoff}, ${wantStatuses.join('/') || 'any status'}): ${
+      summary.matched.join(', ') || DASH
+    }`
+  );
 
   // 2) Open each candidate's card, check nationality, message if RU/BY present.
   let sends = 0;
