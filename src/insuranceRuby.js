@@ -8,7 +8,7 @@
 // pre-filter the list to insurance rows and open only those cards.
 // Dedup: local state (data/insDoc.json). Has its OWN dry-run flag
 // (config.insuranceRuby.dryRun) so it can observe-only while the rest of the bot is LIVE.
-import { config } from './config.js';
+import { config, INSDOC_ASKED_PATTERNS } from './config.js';
 import { log } from './logger.js';
 import { getInsDoc, setInsDoc } from './store.js';
 
@@ -37,6 +37,7 @@ function finish(summary, dry) {
     `InsDoc ${dry ? '[DRY-RUN]' : '[LIVE]'}`,
     `Insurance candidates: ${summary.matched.length} (${summary.matched.join(', ') || DASH})`,
     `${dry ? 'Would send' : 'Sent'}: ${summary.sent.join(', ') || DASH}`,
+    `Already asked in chat: ${(summary.alreadyAsked || []).join(', ') || DASH}`,
     `No RU/BY: ${summary.noRuby.join(', ') || DASH}`,
     `Already checked: ${summary.skippedDone.join(', ') || DASH}`,
     `Errors: ${summary.errors.join(' | ') || DASH}`,
@@ -47,7 +48,15 @@ function finish(summary, dry) {
 }
 
 export async function runInsuranceDoc(travelon) {
-  const summary = { matched: [], sent: [], skippedDone: [], noRuby: [], errors: [], rows: [] };
+  const summary = {
+    matched: [],
+    sent: [],
+    skippedDone: [],
+    alreadyAsked: [],
+    noRuby: [],
+    errors: [],
+    rows: [],
+  };
   const cfg = config.insuranceRuby;
   if (!cfg.enabled) return summary;
 
@@ -55,6 +64,10 @@ export async function runInsuranceDoc(travelon) {
   const cutoff = dateMinusDaysISO(config.tz, cfg.lookbackDays);
   const insRe = new RegExp(cfg.insuranceRe, 'i');
   const wantNat = cfg.nationalities.map((x) => x.toUpperCase());
+  const askedPatterns = cfg.askedRe ? [new RegExp(cfg.askedRe, 'i')] : INSDOC_ASKED_PATTERNS;
+  const wantStatuses = (cfg.statuses || []).map((x) =>
+    x.toLowerCase().replace(/\s+/g, ' ').trim()
+  );
   log.info(
     `[InsDoc] ${dry ? '[DRY-RUN]' : '[LIVE]'} created >= ${cutoff}; nationalities: ${wantNat.join('/')}`
   );
@@ -84,7 +97,10 @@ export async function runInsuranceDoc(travelon) {
       const idM = (r.text || '').match(/\b(\d{5})\b/);
       if (!idM) continue;
       const id = idM[1];
-      if (r.status && /cancel/i.test(r.status)) continue;
+      // Status guard on top of the server-side filter: ONLY Confirmed / Confirmed Print
+      // (Danylo 2026-08-30). Falls back to "anything but Canceled" if the list is empty.
+      const st = (r.status || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      if (wantStatuses.length ? !wantStatuses.includes(st) : /cancel/i.test(st)) continue;
       const created = ddmmyyyyToISO(r.bookingDate);
       if (created && created < cutoff) {
         older += 1;
@@ -130,18 +146,37 @@ export async function runInsuranceDoc(travelon) {
         if (!dry) await setInsDoc(c.id, { checkedAt: new Date().toISOString(), ruby: false });
         continue;
       }
-      // A RU/BY tourist is present.
+      // A RU/BY tourist is present. Never ask twice: skip when the chat already holds a
+      // documents request (ІПН, посвідка про постійне проживання тощо).
+      await travelon.openChat(c.id);
+      const chatText = await travelon.readChatPanelText();
+      if (askedPatterns.some((re) => re.test(chatText))) {
+        summary.alreadyAsked.push(c.id);
+        summary.rows.push(mkRow(c.id, 'Вже запитано в чаті', hit));
+        log.info(`[InsDoc] ${c.id}: documents already requested in chat — skip.`);
+        if (!dry) {
+          await setInsDoc(c.id, {
+            checkedAt: new Date().toISOString(),
+            ruby: true,
+            nationality: hit,
+            source: 'chat-existing',
+          });
+        }
+        await travelon.closeChat(c.id).catch(() => {});
+        continue;
+      }
       if (dry) {
         summary.sent.push(`${c.id}(${hit})`);
         summary.rows.push(mkRow(c.id, 'DRY-RUN: надіслав би', hit, 'DRY-RUN'));
         log.info(`[InsDoc] ${c.id}: WOULD send doc-request (nationality ${hit}). [${nats.join(',')}]`);
+        await travelon.closeChat(c.id).catch(() => {});
         continue; // do NOT persist in dry-run, so LIVE can pick it up later
       }
       if (sends >= cfg.maxSendsPerRun) {
         log.warn(`[InsDoc] reached maxSendsPerRun=${cfg.maxSendsPerRun}; rest next cycle.`);
+        await travelon.closeChat(c.id).catch(() => {});
         break;
       }
-      await travelon.openChat(c.id);
       // Subject "Запит документів для громадянина рф/рб" auto-fills its template body,
       // so we pass an empty text and let sendChatMessage send the template.
       await travelon.sendChatMessage({ department: cfg.department, subject: cfg.subject, text: '' });

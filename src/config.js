@@ -82,9 +82,12 @@ export const config = {
     department: process.env.INSDOC_DEPARTMENT || 'Бронювання',
     subject: process.env.INSDOC_SUBJECT || 'Запит документів для громадянина рф/рб',
     nationalities: list(process.env.INSDOC_NATIONALITIES, ['RUSSIA', 'BELARUS']),
-    // statuses: every one EXCEPT Canceled(5): New=6, In Work=1, Confirmed=2,
-    // Confirmed Print=3, Not Confirmed=4, Not Confirmed From Site=7.
-    statusIds: list(process.env.INSDOC_STATUS_IDS, ['6', '1', '2', '3', '4', '7']),
+    // ONLY Confirmed(2) + Confirmed Print(3) — Danylo 2026-08-30.
+    statusIds: list(process.env.INSDOC_STATUS_IDS, ['2', '3']),
+    // Row-level status guard (labels as rendered in the list; case/space tolerant).
+    statuses: list(process.env.INSDOC_STATUSES, ['Confirmed', 'Confirmed Print']),
+    // Optional single-regex override for "documents already requested in this chat".
+    askedRe: process.env.INSDOC_ASKED_RE || '',
     insuranceRe: process.env.INSDOC_INSURANCE_RE || 'insurance:|страхуванн',
     lookbackDays: num(process.env.INSDOC_LOOKBACK_DAYS, 3),
     maxListPages: num(process.env.INSDOC_MAX_LIST_PAGES, 6),
@@ -235,6 +238,20 @@ export const PHONE_RE = /(?<!\d)(?:380\d{9}|80\d{9}|0\d{9})(?!\d)/g;
 // excludes commas/slashes/colons/letters/newlines so it never fuses dates, times,
 // seat lists or two numbers on separate lines.
 export const PHONE_CANDIDATE_RE = /\+?\d[\d \t.() -]{6,20}\d/g;
+
+// Phrases that mean the documents of a rf/rb citizen were ALREADY requested in this
+// chat (ІПН, посвідка про постійне проживання тощо) — used by insuranceRuby.js so we
+// never ask an agent twice.
+export const INSDOC_ASKED_PATTERNS = [
+  /(?:^|[^\p{L}])іпн(?:[^\p{L}]|$)/iu,
+  /ідентифікаційн/i,
+  /посвідк/i,
+  /дозв[іi]л[^.]{0,30}проживанн/i,
+  /вид\s+на\s+жительство/i,
+  /громадянин[\p{L}]*\s*(?:рф|рб)/iu,
+  /запит\s+документ/i,
+  /документ[\p{L}]*\s+(?:для|від)\s+громадян/iu,
+];
 
 export const BG_ASK_PATTERNS = [/перевізник/i, /контакт.*турист.*перевізник/i];
 export const BG_REMINDER_PATTERNS = [/нагадуємо.*контакт/i, /нагадуємо.*воді/i];
