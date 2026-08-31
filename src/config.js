@@ -325,7 +325,21 @@ export const sel = {
     textArea: ['textarea[placeholder*="Compose" i]', 'div.fixed.top-0.right-0 textarea'],
     toEveryoneButton: ['button:has-text("To everyone")', ':is(button,label):has-text("To everyone")'],
     toAdministratorsButton: ['button:has-text("Send to administrators")'],
-    sendButton: ['button:text-is("Send")', 'button:has-text("Send")'],
+    // The site changed its captions at least once (the requests list stopped
+    // rendering "Room status" — see the InsDoc scan diag of 2026-08-31), and the send
+    // button has been "not found" on every cycle since ~29.08 while the composer still
+    // works through its positional fallbacks. So match the likely captions in every
+    // language instead of English only.
+    sendButton: [
+      'button:text-is("Send")',
+      'button:has-text("Send")',
+      'button:text-is("Надіслати")',
+      'button:has-text("Надіслати")',
+      'button:text-is("Відправити")',
+      'button:has-text("Відправити")',
+      'button:has-text("Отправить")',
+      'button:has-text("Надіслать")',
+    ],
     closeButton: [
       'div.fixed.top-0.right-0 button[aria-label*="close" i]',
       'button[aria-label*="close" i]',

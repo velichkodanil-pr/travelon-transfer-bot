@@ -496,6 +496,31 @@ export class TravelonClient {
     const send = await this.firstExisting(sel.chat.sendButton, { timeout: 5000 });
     if (!send) {
       await this.screenshot('composer-send-not-found');
+      // Diagnostics: the drawer's real button captions, so a caption change can be
+      // fixed from the logs instead of guessing a second time.
+      let captions = '';
+      try {
+        const panel = await this.firstExisting(sel.chat.panel, { timeout: 1000 });
+        if (panel) {
+          const texts = await panel
+            .locator('button, input[type="submit"], [role="button"]')
+            .evaluateAll((els) =>
+              els
+                .map((el) =>
+                  (el.innerText || el.value || el.getAttribute('aria-label') || '')
+                    .replace(/\s+/g, ' ')
+                    .trim()
+                )
+                .filter(Boolean)
+                .slice(0, 25)
+            )
+            .catch(() => []);
+          captions = texts.join(' | ');
+        }
+      } catch {
+        /* diagnostics only */
+      }
+      log.warn(`[chat] send button not found; drawer buttons: ${captions || '(none)'}`);
       throw new Error('Send button not found — verify sel.chat.sendButton.');
     }
     await send.scrollIntoViewIfNeeded().catch(() => {});
