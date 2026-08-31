@@ -122,7 +122,12 @@ export async function runInsuranceDoc(travelon) {
       const stKey = st || '(порожній)';
       diag.statuses.set(stKey, (diag.statuses.get(stKey) || 0) + 1);
       if (r.bookingDate) diag.dates.add(r.bookingDate);
-      if (wantStatuses.length ? !wantStatuses.includes(st) : /cancel/i.test(st)) {
+      // The list no longer exposes the status text (scan diag 2026-08-31: status is
+      // empty for all 300 rows — scanRows() looks for a "Room status" cell that the site
+      // apparently stopped rendering). So enforce the label ONLY when we actually have
+      // one; with no text we trust the server-side filter, which already restricts the
+      // list to INSDOC_STATUS_IDS = 2,3 (Confirmed / Confirmed Print).
+      if (st && (wantStatuses.length ? !wantStatuses.includes(st) : /cancel/i.test(st))) {
         diag.badStatus += 1;
         continue;
       }
