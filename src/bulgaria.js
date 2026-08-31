@@ -90,7 +90,11 @@ function parseBulgariaRow(row, supplier, checkinFrom) {
   // Звірка статусу рядка — стійка до регістру/зайвих пробілів ("In Work"/"In work").
   const _st = (row.status || '').toLowerCase().replace(/\s+/g, ' ').trim();
   const _allowed = config.bulgaria.statuses.map((x) => x.toLowerCase().replace(/\s+/g, ' ').trim());
-  if (!_st || !_allowed.includes(_st)) return null;
+  // The list STOPPED rendering the status label (site change, ~28.08.2026) — it is
+  // empty for every row. Requiring it here silently dropped every booking and
+  // killed the whole contact flow. Enforce the label only when it is actually
+  // present; otherwise trust the server-side status filter (statusIds 2,3,6,1).
+  if (_st && !_allowed.includes(_st)) return null;
   const ci = ddmmyyyyToISO(row.checkin);
   if (!ci || ci < checkinFrom) return null;
   // Не чіпаємо заявку, якщо день ВИЇЗДУ (початок туру) = сьогодні або вже минув.

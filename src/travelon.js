@@ -309,7 +309,10 @@ export class TravelonClient {
         if (seen.has(id)) continue;
         const country = COUNTRY_RE.find((c) => c.re.test(r.text || ''));
         if (!country) continue;
-        if (!r.status || !config.targetStatuses.includes(r.status)) continue;
+        // Same trap as the BG flow: the list no longer renders the status label,
+        // so requiring it dropped every row. Check it only when present — the
+        // server-side filter already restricts the list to statusIds 2,3.
+        if (r.status && !config.targetStatuses.includes(r.status)) continue;
         const createdISO = ddmmyyyyToISO(r.bookingDate);
         if (createdFromISO && createdISO && createdISO < createdFromISO) continue;
         seen.add(id);
