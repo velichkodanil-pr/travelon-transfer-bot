@@ -86,6 +86,18 @@ export async function runInsuranceDoc(travelon) {
 
   const seen = new Set();
   const candidates = [];
+  // TEMP DIAGNOSTICS: three cycles in a row found 0 candidates — record what the list
+  // actually returns and which filter drops the rows, so we can tell "no data yet"
+  // from "status labels no longer match".
+  const diag = {
+    rows: 0,
+    noId: 0,
+    badStatus: 0,
+    older: 0,
+    noIns: 0,
+    statuses: new Map(),
+    dates: new Set(),
+  };
   for (let page = 1; page <= cfg.maxListPages; page++) {
     if (page > 1) {
       await travelon.page
@@ -95,21 +107,35 @@ export async function runInsuranceDoc(travelon) {
     }
     const rows = await travelon.scanRows();
     if (!rows.length) break;
+    diag.rows += rows.length;
     let older = 0;
     for (const r of rows) {
       const idM = (r.text || '').match(/\b(\d{5})\b/);
-      if (!idM) continue;
+      if (!idM) {
+        diag.noId += 1;
+        continue;
+      }
       const id = idM[1];
       // Status guard on top of the server-side filter: ONLY Confirmed / Confirmed Print
       // (Danylo 2026-08-30). Falls back to "anything but Canceled" if the list is empty.
       const st = (r.status || '').toLowerCase().replace(/\s+/g, ' ').trim();
-      if (wantStatuses.length ? !wantStatuses.includes(st) : /cancel/i.test(st)) continue;
+      const stKey = st || '(порожній)';
+      diag.statuses.set(stKey, (diag.statuses.get(stKey) || 0) + 1);
+      if (r.bookingDate) diag.dates.add(r.bookingDate);
+      if (wantStatuses.length ? !wantStatuses.includes(st) : /cancel/i.test(st)) {
+        diag.badStatus += 1;
+        continue;
+      }
       const created = ddmmyyyyToISO(r.bookingDate);
       if (created && created < cutoff) {
         older += 1;
+        diag.older += 1;
         continue;
       }
-      if (!insRe.test(r.text || '')) continue; // must have insurance
+      if (!insRe.test(r.text || '')) {
+        diag.noIns += 1;
+        continue; // must have insurance
+      }
       if (seen.has(id)) continue;
       seen.add(id);
       candidates.push({ id, created: created || '' });
@@ -117,6 +143,19 @@ export async function runInsuranceDoc(travelon) {
     // List is newest-first: if a whole page predates the cutoff, stop paging.
     if (older >= rows.length) break;
   }
+  const topStatuses = [...diag.statuses.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([k, v]) => `"${k}"×${v}`)
+    .join(', ');
+  const topDates = [...diag.dates]
+    .sort((a, b) => (ddmmyyyyToISO(b) || '').localeCompare(ddmmyyyyToISO(a) || ''))
+    .slice(0, 5)
+    .join(', ');
+  log.info(
+    `[InsDoc] scan diag: rows=${diag.rows}, dropped: status=${diag.badStatus}, older=${diag.older}, no-ins=${diag.noIns}, no-id=${diag.noId}; statuses: ${topStatuses || '-'}; newest booking dates: ${topDates || '-'}`
+  );
+
   summary.matched = candidates.map((c) => c.id);
   log.info(
     `[InsDoc] candidates (created >= ${cutoff}, ${wantStatuses.join('/') || 'any status'}): ${
