@@ -1,15 +1,17 @@
 // One full pass: login -> filter -> per-booking dedup check -> send/log.
 import { TravelonClient } from './travelon.js';
-import { config } from './config.js';
+import { config, ALREADY_SENT_PATTERNS } from './config.js';
 import { log } from './logger.js';
-import { wasSent, markSent } from './store.js';
+import { getSent, markSent } from './store.js';
+import { stopRequested, stopReason } from './stop.js';
 import { notify, notifyEnabled } from './notify.js';
 import { runBulgaria } from './bulgaria.js';
 import { runBusWarn } from './busWarn.js';
 import { runInsuranceDoc } from './insuranceRuby.js';
 import { reportEnabled, upsertRows, upsertBusWarnRows, writeBotStatus } from './report.js';
 
-export async function runCycle() {
+// deps are injectable for tests (fake browser client); production uses the defaults.
+export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps } = {}) {
   const startedAt = new Date();
   const summary = {
     dryRun: config.dryRun,
@@ -25,7 +27,7 @@ export async function runCycle() {
   let ins = null;
   let bookings = []; // hoisted so the report step (after the cycle) can see it
 
-  const client = new TravelonClient();
+  const client = makeClient();
   try {
     await client.init();
     await client.login();
@@ -42,11 +44,21 @@ export async function runCycle() {
     summary.matched = bookings.map((b) => `${b.id}/${b.country}`);
 
     let sends = 0;
-    for (const b of bookings) {
+    for (const [idx, b] of bookings.entries()) {
+      if (stopRequested()) {
+        log.warn(`Stop requested — ${bookings.length - idx} booking(s) left for the next cycle.`);
+        break;
+      }
       try {
-        if (await wasSent(b.id)) {
-          summary.skippedStore.push(b.id);
-          log.info(`Skip ${b.id}: already messaged on a previous run.`);
+        const prev = await getSent(b.id);
+        if (prev) {
+          if (prev.source === 'chat-existing') {
+            summary.skippedAlready.push(b.id);
+            log.info(`Skip ${b.id}: request already in chat (remembered).`);
+          } else {
+            summary.skippedStore.push(b.id);
+            log.info(`Skip ${b.id}: already messaged on a previous run.`);
+          }
           continue;
         }
 
@@ -55,6 +67,15 @@ export async function runCycle() {
         if (await client.chatAlreadyRequested()) {
           summary.skippedAlready.push(b.id);
           log.info(`Skip ${b.id}: transfer-phone request already present in chat.`);
+          // Remember it, so the chat is not reopened every hour. Only when the
+          // request is in the chat PANEL itself (chatAlreadyRequested may fall back
+          // to the whole page, and a fluke match there must not become permanent).
+          if (!config.dryRun) {
+            const panel = await client.readChatPanelText().catch(() => '');
+            if (ALREADY_SENT_PATTERNS.some((re) => re.test(panel))) {
+              await markSent(b.id, { country: b.country, source: 'chat-existing' });
+            }
+          }
           await client.closeChat(b.id);
           continue;
         }
@@ -86,17 +107,17 @@ export async function runCycle() {
     }
 
     // Bulgaria + Eline workflow — reuses the same logged-in TravelON session.
-    if (config.bulgaria.enabled) {
-      bg = await runBulgaria(client);
+    if (config.bulgaria.enabled && !stopRequested()) {
+      bg = await runBulgaria(client, bgDeps);
     }
 
     // Bus-seating warning — reuses the same logged-in TravelON session.
-    if (config.busWarn.enabled) {
+    if (config.busWarn.enabled && !stopRequested()) {
       bw = await runBusWarn(client);
     }
 
     // Insurance + RU/BY-citizen document request — reuses the logged-in session.
-    if (config.insuranceRuby.enabled) {
+    if (config.insuranceRuby.enabled && !stopRequested()) {
       ins = await runInsuranceDoc(client);
     }
   } catch (err) {
@@ -118,11 +139,16 @@ export async function runCycle() {
     `Skipped (sent before): ${summary.skippedStore.join(', ') || '—'}`,
     `Errors: ${summary.errors.join(' | ') || '—'}`,
   ];
+  const interrupted = stopRequested() ? stopReason() : '';
+  if (interrupted) lines.push(`Interrupted: ${interrupted} — the rest is picked up by the next cycle`);
   let report = lines.join('\n');
   if (bg && bg.report) report += '\n\n' + bg.report;
   if (bw && bw.report) report += '\n\n' + bw.report;
   if (ins && ins.report) report += '\n\n' + ins.report;
   log.info('Cycle summary:\n' + report);
+  // An interrupted cycle (graceful stop on redeploy) skips notify + Sheet: its
+  // buckets are partial, and unprocessed bookings would be reported as handled.
+  if (interrupted) return { ...summary, bulgaria: bg, interrupted };
   if (notifyEnabled()) await notify(report);
 
   // --- Google Sheet tracker (best-effort; never breaks the cycle) ----------

@@ -3,6 +3,11 @@
 // in-chat scan (chatAlreadyRequested). If DATA_DIR is ephemeral (no volume),
 // the store simply resets on restart and the in-chat scan still prevents
 // double-sends.
+//
+// Every write is ATOMIC (write a temp file, then rename over the old one): a
+// container killed mid-write used to leave half a JSON file, which the loaders
+// below read as "empty" — the next write then replaced the whole history with
+// a single entry.
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
@@ -14,23 +19,46 @@ async function ensureDir() {
   await fs.mkdir(config.dataDir, { recursive: true });
 }
 
-export async function loadSent() {
+let tmpSeq = 0;
+async function writeJsonAtomic(file, obj) {
+  await ensureDir();
+  const tmp = `${file}.${process.pid}.${++tmpSeq}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(obj, null, 2), 'utf8');
+  await fs.rename(tmp, file);
+}
+
+// Missing file -> fallback. Unreadable file -> keep a copy (once per process) and
+// say so in the log instead of silently starting from an empty state.
+const backedUp = new Set();
+async function readJson(file, fallback) {
+  let raw;
   try {
-    const raw = await fs.readFile(FILE, 'utf8');
-    const data = JSON.parse(raw);
-    return new Map(Object.entries(data));
+    raw = await fs.readFile(file, 'utf8');
   } catch {
-    return new Map();
+    return fallback;
   }
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    if (!backedUp.has(file)) {
+      backedUp.add(file);
+      log.warn(`State file ${path.basename(file)} is unreadable (${err.message}) — saved a copy, continuing with an empty state.`);
+      await fs.copyFile(file, `${file}.corrupt-${Date.now()}`).catch(() => {});
+    }
+    return fallback;
+  }
+}
+
+export async function loadSent() {
+  const data = await readJson(FILE, {});
+  return new Map(Object.entries(data && typeof data === 'object' ? data : {}));
 }
 
 export async function markSent(bookingId, meta = {}) {
   try {
-    await ensureDir();
     const sent = await loadSent();
     sent.set(String(bookingId), { at: new Date().toISOString(), ...meta });
-    const obj = Object.fromEntries(sent);
-    await fs.writeFile(FILE, JSON.stringify(obj, null, 2), 'utf8');
+    await writeJsonAtomic(FILE, Object.fromEntries(sent));
   } catch (err) {
     log.warn('Could not persist sent-store (continuing):', err.message);
   }
@@ -41,6 +69,12 @@ export async function wasSent(bookingId) {
   return sent.has(String(bookingId));
 }
 
+// The stored record for a booking ({ at, country, source? }) or null.
+export async function getSent(bookingId) {
+  const sent = await loadSent();
+  return sent.get(String(bookingId)) || null;
+}
+
 // --- Bulgaria/Eline per-booking watch state -------------------------------
 // Stored in data/bulgaria.json: { [bookingId]: { askedAt, remindedAt, doneAt, ... } }
 // Persist across restarts by attaching a Railway Volume at DATA_DIR (optional;
@@ -48,11 +82,7 @@ export async function wasSent(bookingId) {
 const WATCH_FILE = path.join(config.dataDir, 'bulgaria.json');
 
 export async function loadWatch() {
-  try {
-    return JSON.parse(await fs.readFile(WATCH_FILE, 'utf8'));
-  } catch {
-    return {};
-  }
+  return readJson(WATCH_FILE, {});
 }
 
 export async function getWatch(bookingId) {
@@ -62,11 +92,10 @@ export async function getWatch(bookingId) {
 
 export async function setWatch(bookingId, patch) {
   try {
-    await ensureDir();
     const w = await loadWatch();
     const key = String(bookingId);
     w[key] = { ...(w[key] || {}), ...patch };
-    await fs.writeFile(WATCH_FILE, JSON.stringify(w, null, 2), 'utf8');
+    await writeJsonAtomic(WATCH_FILE, w);
   } catch (err) {
     log.warn('Could not persist watch-store (continuing):', err.message);
   }
@@ -76,11 +105,7 @@ export async function setWatch(bookingId, patch) {
 const BUSWARN_FILE = path.join(config.dataDir, 'busWarn.json');
 
 export async function loadBusWarn() {
-  try {
-    return JSON.parse(await fs.readFile(BUSWARN_FILE, 'utf8'));
-  } catch {
-    return {};
-  }
+  return readJson(BUSWARN_FILE, {});
 }
 
 export async function getBusWarn(bookingId) {
@@ -90,11 +115,10 @@ export async function getBusWarn(bookingId) {
 
 export async function setBusWarn(bookingId, patch) {
   try {
-    await ensureDir();
     const w = await loadBusWarn();
     const key = String(bookingId);
     w[key] = { ...(w[key] || {}), ...patch };
-    await fs.writeFile(BUSWARN_FILE, JSON.stringify(w, null, 2), 'utf8');
+    await writeJsonAtomic(BUSWARN_FILE, w);
   } catch (err) {
     log.warn('Could not persist busWarn-store (continuing):', err.message);
   }
@@ -104,11 +128,7 @@ export async function setBusWarn(bookingId, patch) {
 const INSDOC_FILE = path.join(config.dataDir, 'insDoc.json');
 
 export async function loadInsDoc() {
-  try {
-    return JSON.parse(await fs.readFile(INSDOC_FILE, 'utf8'));
-  } catch {
-    return {};
-  }
+  return readJson(INSDOC_FILE, {});
 }
 
 export async function getInsDoc(bookingId) {
@@ -118,11 +138,10 @@ export async function getInsDoc(bookingId) {
 
 export async function setInsDoc(bookingId, patch) {
   try {
-    await ensureDir();
     const w = await loadInsDoc();
     const key = String(bookingId);
     w[key] = { ...(w[key] || {}), ...patch };
-    await fs.writeFile(INSDOC_FILE, JSON.stringify(w, null, 2), 'utf8');
+    await writeJsonAtomic(INSDOC_FILE, w);
   } catch (err) {
     log.warn('Could not persist insDoc-store (continuing):', err.message);
   }

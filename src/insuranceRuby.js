@@ -11,6 +11,7 @@
 import { config, INSDOC_ASKED_PATTERNS } from './config.js';
 import { log } from './logger.js';
 import { getInsDoc, setInsDoc } from './store.js';
+import { stopRequested } from './stop.js';
 
 const DASH = '-';
 
@@ -99,6 +100,7 @@ export async function runInsuranceDoc(travelon) {
     dates: new Set(),
   };
   for (let page = 1; page <= cfg.maxListPages; page++) {
+    if (stopRequested()) break;
     if (page > 1) {
       await travelon.page
         .goto(`${config.requestsUrl}?page=${page}`, { waitUntil: 'domcontentloaded' })
@@ -177,7 +179,11 @@ export async function runInsuranceDoc(travelon) {
     status,
     note,
   });
-  for (const c of candidates) {
+  for (const [idx, c] of candidates.entries()) {
+    if (stopRequested()) {
+      log.warn(`[InsDoc] stop requested — ${candidates.length - idx} booking(s) left for the next cycle.`);
+      break;
+    }
     try {
       const st = await getInsDoc(c.id);
       if (st && st.checkedAt) {

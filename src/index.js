@@ -1,11 +1,14 @@
-// Entry point: validate config, run once at startup, then schedule every N min.
+// Entry point: validate config, then run on the cron schedule (and once at boot
+// only when RUN_ON_STARTUP=true).
 import cron from 'node-cron';
 import { config, validateConfig } from './config.js';
 import { log } from './logger.js';
 import { runCycle } from './runCycle.js';
+import { requestStop } from './stop.js';
 
 let running = false;
 let startedAt = 0;
+let stopping = false;
 
 // Race the cycle against a hard deadline. A hung Playwright call never rejects,
 // so we cannot "cancel" it — the only reliable recovery is to exit and let
@@ -24,6 +27,10 @@ function cycleDeadline(ms) {
 }
 
 async function safeRun(trigger) {
+  if (stopping) {
+    log.info(`Shutting down — ignoring the ${trigger} tick.`);
+    return;
+  }
   if (running) {
     const mins = Math.round((Date.now() - startedAt) / 60000);
     log.warn(`Cycle still running (${mins} min) — skipping this ${trigger} tick.`);
@@ -48,6 +55,10 @@ async function safeRun(trigger) {
   } finally {
     deadline.cancel();
     running = false;
+    if (stopping) {
+      log.info('Cycle wound down after the stop request — exiting.');
+      process.exit(0);
+    }
   }
 }
 
@@ -63,6 +74,7 @@ async function main() {
   log.info(' TravelON transfer-phone bot');
   log.info(` mode      : ${config.dryRun ? 'DRY-RUN (no messages sent)' : 'LIVE (will send)'}`);
   log.info(` schedule  : "${config.checkCron}"  tz=${config.tz}`);
+  log.info(` startup   : ${config.runOnce || config.runOnStartup ? 'run a cycle now' : 'wait for the schedule'}`);
   log.info(` countries : ${config.targetCountries.join(', ')}`);
   log.info(` statuses  : ${config.targetStatuses.join(', ')}`);
   log.info(` onlyToday : ${config.onlyToday}`);
@@ -71,12 +83,11 @@ async function main() {
       config.eline.email && config.eline.password ? 'set' : 'MISSING'
     })`
   );
+  log.info(` shutdown  : graceful, finish current booking (max ${Math.round(config.stopGraceMs / 1000)}s)`);
   log.info('============================================================');
 
-  // Run immediately on boot.
-  await safeRun('startup');
-
   if (config.runOnce) {
+    await safeRun('startup');
     log.info('RUN_ONCE=true — exiting after a single cycle.');
     process.exit(0);
   }
@@ -92,16 +103,40 @@ async function main() {
       config.cycleTimeoutMs / 60000
     )} min. Waiting for next tick…`
   );
+
+  // Optional boot cycle (off by default: a deploy/restart must not start an
+  // extra cycle mid-hour — the schedule picks everything up).
+  if (config.runOnStartup) await safeRun('startup');
 }
 
-process.on('SIGTERM', () => {
-  log.info('SIGTERM received — shutting down.');
-  process.exit(0);
-});
-process.on('SIGINT', () => {
-  log.info('SIGINT received — shutting down.');
-  process.exit(0);
-});
+// Graceful stop (Railway sends SIGTERM on every deploy/restart): when idle, exit
+// at once; mid-cycle, let the booking in progress finish (its chat message and
+// state write), skip the rest, then exit. A second signal or the grace timeout
+// exits immediately.
+function onSignal(sig) {
+  if (stopping) {
+    log.warn(`${sig} received again — exiting now.`);
+    process.exit(0);
+  }
+  stopping = true;
+  if (!running) {
+    log.info(`${sig} received — idle, shutting down.`);
+    process.exit(0);
+  }
+  log.warn(
+    `${sig} received mid-cycle — finishing the current booking, then exiting (max ${Math.round(
+      config.stopGraceMs / 1000
+    )}s).`
+  );
+  requestStop(sig);
+  setTimeout(() => {
+    log.warn('Graceful stop timed out — exiting.');
+    process.exit(0);
+  }, config.stopGraceMs).unref();
+}
+
+process.on('SIGTERM', () => onSignal('SIGTERM'));
+process.on('SIGINT', () => onSignal('SIGINT'));
 process.on('unhandledRejection', (reason) => {
   log.error('Unhandled promise rejection:', reason);
 });

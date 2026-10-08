@@ -8,6 +8,7 @@
 import { config, BUSWARN_TEXT, BUSWARN_PATTERNS } from './config.js';
 import { log } from './logger.js';
 import { getBusWarn, setBusWarn } from './store.js';
+import { stopRequested } from './stop.js';
 
 const DASH = '-';
 
@@ -54,6 +55,7 @@ export async function runBusWarn(travelon) {
   const candidates = [];
   const seen = new Set();
   for (const sup of config.busWarn.suppliers) {
+    if (stopRequested()) break;
     try {
       await travelon.applyBusFilter(sup.partnerId, config.busWarn.statusIds, tDDMM);
     } catch (err) {
@@ -101,7 +103,12 @@ export async function runBusWarn(travelon) {
     status,
     note,
   });
-  for (const c of candidates) {
+  for (const [idx, c] of candidates.entries()) {
+    if (stopRequested()) {
+      summary.interrupted = true;
+      log.warn(`[BusWarn] stop requested — ${candidates.length - idx} booking(s) left for the next cycle.`);
+      break;
+    }
     try {
       const w = await getBusWarn(c.id);
       if (w?.warnedAt && !config.dryRun) {

@@ -31,6 +31,14 @@ export const config = {
   dryRun: bool(process.env.DRY_RUN, true),
   checkCron: process.env.CHECK_CRON || '*/30 * * * *',
   runOnce: bool(process.env.RUN_ONCE, false),
+  // A (re)start does NOT run a cycle by default: the next cron tick does. A deploy
+  // or a crash-restart can no longer start an extra cycle in the middle of the
+  // hour (the manager-bot pattern). RUN_ON_STARTUP=true restores the old behaviour.
+  runOnStartup: bool(process.env.RUN_ON_STARTUP, false),
+  // Graceful stop: on SIGTERM the booking in progress is finished, the rest waits
+  // for the next cycle; after this many seconds we exit regardless. Keep it below
+  // the Railway draining time (RAILWAY_DEPLOYMENT_DRAINING_SECONDS / service setting).
+  stopGraceMs: num(process.env.STOP_GRACE_SEC, 100) * 1000,
   // WATCHDOG: hard deadline for ONE cycle. A Playwright call that hangs (no
   // timeout fires) used to wedge the bot forever: `running` stayed true, every
   // later cron tick was skipped, and the service looked healthy while doing
@@ -145,6 +153,13 @@ export const config = {
     checkinFromDays: num(process.env.BG_CHECKIN_FROM_DAYS, 1),
     createdFromISO: process.env.BG_CREATED_FROM || '2026-01-01',
     maxListPages: num(process.env.BG_MAX_LIST_PAGES, 20),
+    // Ask TravelON for check-in >= (cutoff - margin) server-side instead of paging
+    // through the supplier's whole history (old bookings were read every hour and
+    // thrown away in code). The exact cutoff is still applied per row; the margin
+    // only guards against the server counting "entry" slightly differently.
+    // BG_SERVER_DATE_FILTER=false restores the old full-history scan.
+    serverDateFilter: bool(process.env.BG_SERVER_DATE_FILTER, true),
+    serverDateMarginDays: num(process.env.BG_SERVER_DATE_MARGIN_DAYS, 3),
     department: process.env.BG_DEPARTMENT || 'Бронювання',
     subject: process.env.BG_SUBJECT || 'Надання контактів водію автобуса',
     askText:
@@ -160,6 +175,14 @@ export const config = {
     password: process.env.ELINE_PASSWORD || '',
     baseUrl: (process.env.ELINE_BASE_URL || 'https://eline-tour.com.ua').replace(/\/$/, ''),
     loginUrl: process.env.ELINE_LOGIN_URL || 'https://eline-tour.com.ua/admin/users/sign_in',
+    // One booking's portal work (open + read [+ write + verify]) normally takes
+    // ~15-30 s. Twice (01.10, 08.10) a portal call hung until the 45-min cycle
+    // watchdog killed the whole bot. Now the Eline browser is closed after this
+    // long (the hung call fails, only that booking is retried next cycle), and
+    // after ELINE_MAX_TIMEOUTS_PER_CYCLE such timeouts the portal is skipped for
+    // the rest of the cycle.
+    opTimeoutMs: num(process.env.ELINE_OP_TIMEOUT_SEC, 180) * 1000,
+    maxTimeoutsPerCycle: num(process.env.ELINE_MAX_TIMEOUTS_PER_CYCLE, 2),
   },
   // Itravel supplier CLIENT CABINET (i-travel.com.ua, WordPress). SEPARATE login.
   // Login is standard WordPress (wp-login.php, fields log/pwd). After login we verify

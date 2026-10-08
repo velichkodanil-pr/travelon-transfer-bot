@@ -10,14 +10,21 @@ export class ElineClient {
     this.browser = null;
     this.context = null;
     this.page = null;
+    this.closed = false;
   }
 
   async init() {
-    this.browser = await chromium.launch({
+    const browser = await chromium.launch({
       headless: config.headless,
       slowMo: config.slowMo || undefined,
       args: ['--no-sandbox', '--disable-dev-shm-usage'],
     });
+    // Closed (deadline hit) while the browser was still starting: don't leak it.
+    if (this.closed) {
+      await browser.close().catch(() => {});
+      throw new Error('[Eline] client was closed during start-up');
+    }
+    this.browser = browser;
     this.context = await this.browser.newContext({
       locale: 'uk-UA',
       timezoneId: config.tz,
@@ -28,6 +35,7 @@ export class ElineClient {
   }
 
   async close() {
+    this.closed = true;
     await this.browser?.close().catch(() => {});
   }
 
@@ -86,7 +94,7 @@ export class ElineClient {
     const count = await inputs.count().catch(() => 0);
     const out = [];
     for (let i = 0; i < count; i++) {
-      const v = await inputs.nth(i).inputValue().catch(() => '');
+      const v = await inputs.nth(i).inputValue({ timeout: 10000 }).catch(() => '');
       if (v && v.trim()) out.push(v.trim());
     }
     return out;
@@ -105,7 +113,7 @@ export class ElineClient {
     const plan = assignPhones(phones, count);
     if (dryRun) return { count, plan, wrote: false, verified: false, present: [] };
     for (let i = 0; i < count; i++) {
-      await inputs.nth(i).fill(plan[i] ?? '').catch(() => {});
+      await inputs.nth(i).fill(plan[i] ?? '', { timeout: 10000 }).catch(() => {});
     }
     const save = this.page.locator(sel.eline.saveButton).filter({ hasText: /Зберегти|Save/i }).first();
     if ((await save.count().catch(() => 0)) === 0) {

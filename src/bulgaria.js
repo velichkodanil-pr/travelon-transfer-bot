@@ -11,10 +11,11 @@
 // DRY_RUN: detects + logs intended actions, writes/sends nothing.
 import { config, BG_ASK_PATTERNS, BG_REMINDER_PATTERNS } from './config.js';
 import { log } from './logger.js';
-import { extractPhones, normalizeUaPhone } from './phone.js';
+import { extractPhones, normalizeUaPhone, isUsablePhone } from './phone.js';
 import { ElineClient } from './eline.js';
 import { ItravelClient } from './itravel.js';
 import { getWatch, setWatch } from './store.js';
+import { stopRequested } from './stop.js';
 
 const ELINE_REF_RE = /E\.?\s*Line\s*Tour\s*-\s*(\d+)/i;
 const DASH = '-';
@@ -23,15 +24,35 @@ const DASH = '-';
 // A field value counts as a phone ONLY if it is a valid UA number (380/80/0
 // formats). Prevents non-phones (e.g. a wrong 13-digit value in the Eline
 // portal field) from being mistaken for a tourist phone.
-const looksLikePhone = (v) => Boolean(normalizeUaPhone(v));
+// A date read as a number ("05.09.2026 22:…" -> +380509202622) is not a phone either.
+const looksLikePhone = (v) => isUsablePhone(v);
 // Санітайзер для ЗБЕРЕЖЕНИХ номерів: у стані бота можуть лишатися сміттєві
-// значення, записані ще до суворої валідації (напр. 2283019842534). Ніколи не
-// показуємо їх у звіті і не шлемо постачальнику.
-const validPhones = (arr) => (arr || []).filter((p) => Boolean(normalizeUaPhone(p)));
+// значення, записані ще до суворої валідації (напр. 2283019842534) або дати,
+// прочитані як номер (напр. +380707202712 у 72411). Ніколи не показуємо їх у
+// звіті і не шлемо постачальнику.
+const validPhones = (arr) => (arr || []).filter((p) => isUsablePhone(p));
+
+// Shown in the report while an Itravel booking has the tourist phone but its row
+// in TravelON does not carry the Itravel order number yet (we need it to open
+// the order in the Itravel cabinet). Not an error: nothing to do until it appears.
+const WAIT_REF_STATUS = 'Очікує № замовлення Itravel';
+const WAIT_REF_NOTE =
+  'телефон є; постачальнику напишемо, щойно в заявці з’явиться номер замовлення Itravel';
+
+class ElineTimeout extends Error {}
 
 function ddmmyyyyToISO(d) {
   const m = d && d.match(/(\d{2})\.(\d{2})\.(\d{4})/);
   return m ? `${m[3]}-${m[2]}-${m[1]}` : null;
+}
+function addDaysISO(iso, days) {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+function isoToDDMMYYYY(iso) {
+  const [y, m, d] = iso.split('-');
+  return `${d}.${m}.${y}`;
 }
 // Earliest CHECK-IN date a Bulgaria booking may have to be in scope: today's date
 // in `tz` plus `days` days (1 => tomorrow). Returns YYYY-MM-DD.
@@ -175,7 +196,11 @@ async function writeToEline(booking, phones, summary, ensureEline, agentPhone) {
   return true;
 }
 
-export async function runBulgaria(travelon) {
+// deps are injectable for tests (fake portal clients); production uses the defaults.
+export async function runBulgaria(
+  travelon,
+  { makeEline = () => new ElineClient(), makeItravel = () => new ItravelClient() } = {}
+) {
   const summary = {
     dryRun: config.dryRun,
     matched: [],
@@ -185,8 +210,10 @@ export async function runBulgaria(travelon) {
     asked: [],
     reminded: [],
     waiting: [],
+    waitingRef: [], // Itravel: phone known, order number not in the booking yet
     skippedDone: [],
     errors: [],
+    interrupted: false,
     rows: [], // per-booking rows for the Google Sheet report
   };
   if (!config.bulgaria.enabled) return summary;
@@ -213,11 +240,28 @@ export async function runBulgaria(travelon) {
   // server-side, clear date filters, page the result keeping Bulgaria bookings whose
   // CHECK-IN is tomorrow or later).
   const checkinFrom = checkinCutoffISO(config.tz, config.bulgaria.checkinFromDays);
-  log.info(`[BG] check-in cutoff (>= ${checkinFrom}); booking date: any`);
+  // Server-side check-in floor (a few days of margin; the exact cutoff is applied
+  // per row below) — instead of paging through each supplier's whole history.
+  const serverFrom = config.bulgaria.serverDateFilter
+    ? isoToDDMMYYYY(addDaysISO(checkinFrom, -Math.abs(config.bulgaria.serverDateMarginDays)))
+    : null;
+  log.info(
+    `[BG] check-in cutoff (>= ${checkinFrom}); booking date: any; list filter: ${
+      serverFrom ? `check-in >= ${serverFrom}` : 'all dates'
+    }`
+  );
   const candidates = [];
   const seen = new Set();
   for (const supplier of config.bulgaria.suppliers) {
-    await travelon.applyBulgariaSupplierFilter(supplier.partnerId, config.bulgaria.statusIds);
+    if (stopRequested()) {
+      summary.interrupted = true;
+      break;
+    }
+    if (serverFrom) {
+      await travelon.applyBusFilter(supplier.partnerId, config.bulgaria.statusIds, serverFrom);
+    } else {
+      await travelon.applyBulgariaSupplierFilter(supplier.partnerId, config.bulgaria.statusIds);
+    }
     let prevFirstId = null;
     let supCount = 0;
     for (let page = 1; page <= config.bulgaria.maxListPages; page++) {
@@ -263,23 +307,86 @@ export async function runBulgaria(travelon) {
 
   // 2) Process each candidate.
   let eline = null;
+  // The client is captured locally: a call abandoned by the deadline below must
+  // keep using ITS (closed) browser, never the fresh one created after it.
   const ensureEline = async () => {
-    if (!eline) {
-      eline = new ElineClient();
-      await eline.init();
-      await eline.login();
+    if (eline) return eline;
+    const client = makeEline();
+    eline = client;
+    await client.init();
+    await client.login();
+    return client;
+  };
+  // One booking's Eline work with a deadline. A hung portal call cannot be
+  // cancelled, so on timeout the Eline browser is closed (the hung call then
+  // fails) and a new one is started on next use. After maxTimeoutsPerCycle
+  // timeouts the portal is skipped for the rest of this cycle.
+  let elineTimeouts = 0;
+  const elineDown = () => elineTimeouts >= config.eline.maxTimeoutsPerCycle;
+  const withElineDeadline = async (id, what, fn) => {
+    if (elineDown()) {
+      throw new Error(`Eline portal skipped for the rest of this cycle (${elineTimeouts} timeout(s))`);
     }
-    return eline;
+    const secs = Math.round(config.eline.opTimeoutMs / 1000);
+    let timer = null;
+    const work = Promise.resolve().then(fn);
+    work.catch(() => {}); // an abandoned call may still reject later — ignore it
+    try {
+      return await Promise.race([
+        work,
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new ElineTimeout(`Eline ${what} did not finish in ${secs}s`)),
+            config.eline.opTimeoutMs
+          );
+        }),
+      ]);
+    } catch (err) {
+      if (err instanceof ElineTimeout) {
+        elineTimeouts += 1;
+        log.error(
+          `[BG] ${id}: ${err.message} — closing the portal browser${
+            elineDown() ? '; Eline skipped for the rest of this cycle' : ''
+          }.`
+        );
+        const stale = eline;
+        eline = null;
+        if (stale) {
+          await Promise.race([
+            stale.close().catch(() => {}),
+            new Promise((r) => setTimeout(r, 15000)),
+          ]);
+        }
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  // Eline write for a booking whose phone we have. Never throws: a failed or
+  // timed-out portal step just leaves the booking open for the next cycle.
+  const elineWrite = async (c, phones, agentPhone) => {
+    try {
+      return await withElineDeadline(c.id, 'write', () =>
+        writeToEline(c, phones, summary, ensureEline, agentPhone)
+      );
+    } catch (err) {
+      summary.errors.push(`${c.id}: Eline: ${err.message}`);
+      summary.eline.push(`${c.id}->#${c.elineNum} FAILED`);
+      log.error(`[BG] ${c.id} Eline#${c.elineNum}: ${err.message} — will retry next cycle.`);
+      return false;
+    }
   };
   let itravel = null;
   const ensureItravel = async () => {
-    if (!itravel) {
-      itravel = new ItravelClient();
-      await itravel.init();
-      await itravel.login();
-    }
-    return itravel;
+    if (itravel) return itravel;
+    const client = makeItravel();
+    itravel = client;
+    await client.init();
+    await client.login();
+    return client;
   };
+  const waitingRef = new Set();
   // Only persist watch state in LIVE mode (so DRY-RUN never pre-marks anything).
   const persist = async (id, patch) => {
     // Ніколи не зберігаємо невалідні номери — інакше вони житимуть у стані вічно.
@@ -297,7 +404,12 @@ export async function runBulgaria(travelon) {
       return false;
     }
     if (!c.supplierRef) {
-      summary.errors.push(`${c.id}: no Itravel order ref; cabinet message skipped`);
+      // Not an error: the Itravel order number simply is not in the booking yet.
+      if (!waitingRef.has(c.id)) {
+        waitingRef.add(c.id);
+        summary.waitingRef.push(c.id);
+        log.info(`[Itravel] ${c.id}: no Itravel order number in the booking yet — will message once it appears.`);
+      }
       return false;
     }
     const client = await ensureItravel();
@@ -324,7 +436,12 @@ export async function runBulgaria(travelon) {
   };
 
   try {
-    for (const c of candidates) {
+    for (const [idx, c] of candidates.entries()) {
+      if (stopRequested()) {
+        summary.interrupted = true;
+        log.warn(`[BG] stop requested — ${candidates.length - idx} booking(s) left for the next cycle.`);
+        break;
+      }
       try {
         const w = await getWatch(c.id);
         // In LIVE mode skip bookings we've already completed. In DRY-RUN ignore
@@ -357,6 +474,35 @@ export async function runBulgaria(travelon) {
           continue;
         }
 
+        // Itravel booking whose phone we already have; only the Itravel order
+        // number (read from the list row) is missing. Nothing can be done until it
+        // appears — don't reopen the booking and its chat every hour.
+        const knownPhones = validPhones(w?.phones);
+        if (
+          !config.dryRun &&
+          config.itravel.enabled &&
+          c.messageItravel &&
+          !c.writeToEline &&
+          !c.supplierRef &&
+          knownPhones.length
+        ) {
+          if (!waitingRef.has(c.id)) {
+            waitingRef.add(c.id);
+            summary.waitingRef.push(c.id);
+          }
+          summary.rows.push(
+            mkRow(c, {
+              phonePresent: 'так',
+              agentNumber: knownPhones.join(' '),
+              writtenInBooking: 'так',
+              writtenInEline: 'не потрібно',
+              status: WAIT_REF_STATUS,
+              note: WAIT_REF_NOTE,
+            })
+          );
+          continue;
+        }
+
         // (a) phone already in the comment fields?
         await travelon.openEdit(c.id);
         const comments = await travelon.readComments();
@@ -366,9 +512,7 @@ export async function runBulgaria(travelon) {
           (p) => p !== agentPhone
         );
         if (phones.length) {
-          const elineOk = c.writeToEline
-            ? await writeToEline(c, phones, summary, ensureEline, agentPhone)
-            : true;
+          const elineOk = c.writeToEline ? await elineWrite(c, phones, agentPhone) : true;
           let itravelMsgAt = null;
           if (c.messageItravel) {
             try {
@@ -399,11 +543,19 @@ export async function runBulgaria(travelon) {
                     ? 'так'
                     : 'НІ — не підтверджено'
                 : 'не потрібно',
-              status: supplierOk ? 'Зроблено' : 'Помилка — постачальник не отримав',
+              status: supplierOk
+                ? 'Зроблено'
+                : waitingRef.has(c.id) && elineOk
+                  ? WAIT_REF_STATUS
+                  : 'Помилка — постачальник не отримав',
               note: [
                 dryTag,
                 `телефон уже в коментарях заявки (${c.supplier})`,
-                supplierOk ? '' : 'запис постачальнику не підтверджено — повтор наступного циклу',
+                supplierOk
+                  ? ''
+                  : waitingRef.has(c.id) && elineOk
+                    ? WAIT_REF_NOTE
+                    : 'запис постачальнику не підтверджено — повтор наступного циклу',
               ]
                 .filter(Boolean)
                 .join(' · '),
@@ -427,9 +579,7 @@ export async function runBulgaria(travelon) {
               ', '
             )}] to both comment fields`
           );
-          const elineOk = c.writeToEline
-            ? await writeToEline(c, phones, summary, ensureEline, agentPhone)
-            : true;
+          const elineOk = c.writeToEline ? await elineWrite(c, phones, agentPhone) : true;
           let itravelMsgAt = null;
           if (c.messageItravel) {
             try {
@@ -460,11 +610,19 @@ export async function runBulgaria(travelon) {
                     ? 'так'
                     : 'НІ — не підтверджено'
                 : 'не потрібно',
-              status: supplierOk ? 'Зроблено' : 'Помилка — постачальник не отримав',
+              status: supplierOk
+                ? 'Зроблено'
+                : waitingRef.has(c.id) && elineOk
+                  ? WAIT_REF_STATUS
+                  : 'Помилка — постачальник не отримав',
               note: [
                 dryTag,
                 `номер із чату агента (${c.supplier})`,
-                supplierOk ? '' : 'запис постачальнику не підтверджено — повтор наступного циклу',
+                supplierOk
+                  ? ''
+                  : waitingRef.has(c.id) && elineOk
+                    ? WAIT_REF_NOTE
+                    : 'запис постачальнику не підтверджено — повтор наступного циклу',
               ]
                 .filter(Boolean)
                 .join(' · '),
@@ -478,11 +636,13 @@ export async function runBulgaria(travelon) {
         if (c.writeToEline && config.eline.email && config.eline.password) {
           let elinePhones = [];
           try {
-            const el = await ensureEline();
-            await el.openBooking(c.elineNum);
-            elinePhones = (await el.readPassengerPhones())
-              .filter(looksLikePhone)
-              .filter((p) => normalizeUaPhone(p) !== agentPhone);
+            elinePhones = await withElineDeadline(c.id, 'precheck', async () => {
+              const el = await ensureEline();
+              await el.openBooking(c.elineNum);
+              return (await el.readPassengerPhones())
+                .filter(looksLikePhone)
+                .filter((p) => normalizeUaPhone(p) !== agentPhone);
+            });
           } catch (err) {
             summary.errors.push(`${c.id}: Eline precheck failed: ${err.message}`);
             log.error(`[BG] ${c.id}: Eline precheck failed:`, err.message);
@@ -591,6 +751,7 @@ export async function runBulgaria(travelon) {
     `Matched: ${summary.matched.length} (${summary.matched.join(', ') || DASH})`,
     `Eline writes: ${summary.eline.join(', ') || DASH}`,
     `Itravel msgs: ${summary.itravel.join(', ') || DASH}`,
+    `Waiting Itravel order №: ${summary.waitingRef.join(', ') || DASH}`,
     `Comment writes: ${summary.comments.join(', ') || DASH}`,
     `Asked: ${summary.asked.join(', ') || DASH}`,
     `Reminded: ${summary.reminded.join(', ') || DASH}`,
@@ -598,6 +759,7 @@ export async function runBulgaria(travelon) {
     `Already done: ${summary.skippedDone.join(', ') || DASH}`,
     `Errors: ${summary.errors.join(' | ') || DASH}`,
   ];
+  if (summary.interrupted) lines.push('Interrupted: stop requested (rest next cycle)');
   log.info('[BG] summary:\n' + lines.join('\n'));
   summary.report = lines.join('\n');
   return summary;

@@ -19,19 +19,72 @@ export function normalizeUaPhone(raw) {
   return `+380${local}`;
 }
 
+// Ukrainian MOBILE operator codes (the two digits after +380): 039 Kyivstar
+// (ex-Golden Telecom), 050/066/075/095/099 Vodafone, 063/073/093 lifecell,
+// 067/068/077/096/097/098 Kyivstar, 089/094 Intertelecom, 091 3Mob,
+// 092 PEOPLEnet. Comments and chats are full of other digit runs (dates,
+// prices, IBANs, order numbers); a "number" with any other code is not a
+// tourist's mobile, so it is never treated as one.
+const UA_MOBILE_CODES = new Set([
+  '39', '50', '63', '66', '67', '68', '73', '75', '77', '89',
+  '91', '92', '93', '94', '95', '96', '97', '98', '99',
+]);
+
+// A date + hour fused into a "phone" by the separator-tolerant candidate regex:
+// "05.10.2026 09:15" -> token "05.10.2026 09" -> 0510202609 -> +380510202609.
+// The 9 local digits then read D MM 20YY HH. Real numbers practically never have
+// this shape (needs 202x in the middle AND a valid month and hour around it).
+// Seen in prod: +380707202712 (72411), +380909202622 (70219), +380509202622 (72129).
+const DATE_SHAPED_LOCAL_RE = /^[1-9](0[1-9]|1[0-2])20[2-3]\d([01]\d|2[0-3])$/;
+
+// Dates (optionally followed by a time) are cut out of free text BEFORE looking
+// for phones, so a date can never be read as — or glued onto — a number.
+// Day 1-31, month 1-12, year 2 or 4 digits; "о"/"в"/"at" allowed before the time.
+const DATE_TIME_RE =
+  /(?<!\d)(?:0?[1-9]|[12]\d|3[01])[./-](?:0?[1-9]|1[0-2])[./-](?:\d{4}|\d{2})(?!\d)(?:[ \t,]*(?:о|об|в|at)?[ \t]*(?:[01]?\d|2[0-3])[:.][0-5]\d(?::[0-5]\d)?(?!\d))?/giu;
+
+export function stripDates(text) {
+  return String(text || '').replace(DATE_TIME_RE, '\n');
+}
+
+// True for a UA number whose digits are really a date + hour (see above).
+export function isDateShaped(phone) {
+  const canon = normalizeUaPhone(phone);
+  return Boolean(canon) && DATE_SHAPED_LOCAL_RE.test(canon.slice(4));
+}
+
+// A stored/portal value we may treat as a phone: a valid UA number that is not
+// a date in disguise. (Operator codes are NOT checked here — the agent or the
+// supplier typed it into a phone field, so it is meant as a phone.)
+export function isUsablePhone(phone) {
+  return Boolean(normalizeUaPhone(phone)) && !isDateShaped(phone);
+}
+
+// A number found in FREE TEXT that we may treat as the tourist's mobile.
+export function isPlausibleUaMobile(phone) {
+  const canon = normalizeUaPhone(phone);
+  if (!canon || isDateShaped(canon)) return false;
+  return UA_MOBILE_CODES.has(canon.slice(4, 6));
+}
+
 // Extract all recognised phone numbers from a text — canonicalised to
 // "+380XXXXXXXXX" and de-duplicated, order kept. Tolerates the human formats
 // agents type, e.g. "+380(67)594-18-21", "+380 97 425 81 22", "0(63)384-60-02".
-export function extractPhones(text) {
+//   strict (default): dates are cut out first and only plausible UA MOBILE
+//     numbers are returned — use it to decide what the tourist's phone IS;
+//   strict:false: the old structural parse — use it only to check whether a
+//     number is already PRESENT in a thread (dedup / verify after sending).
+export function extractPhones(text, { strict = true } = {}) {
   if (!text) return [];
+  const src = strict ? stripDates(text) : String(text);
   const seen = new Set();
   const out = [];
-  for (const m of String(text).match(PHONE_CANDIDATE_RE) || []) {
+  for (const m of src.match(PHONE_CANDIDATE_RE) || []) {
     const phone = normalizeUaPhone(m);
-    if (phone && !seen.has(phone)) {
-      seen.add(phone);
-      out.push(phone);
-    }
+    if (!phone || seen.has(phone)) continue;
+    if (strict && !isPlausibleUaMobile(phone)) continue;
+    seen.add(phone);
+    out.push(phone);
   }
   return out;
 }
@@ -50,15 +103,16 @@ export function assignPhones(phones, passengerCount) {
 // word "турист" appears within ~80 chars of the number. (Kept for callers that
 // want the stricter proximity rule; the Bulgaria flow currently treats any
 // number in the chat panel as the tourist's, per operator guidance.)
-export function extractTouristPhones(text) {
-  if (!text) return [];
+export function extractTouristPhones(rawText) {
+  if (!rawText) return [];
+  const text = stripDates(rawText); // the ~80-char window is measured on the date-free text
   const re = new RegExp(PHONE_CANDIDATE_RE.source, 'g');
   const seen = new Set();
   const out = [];
   let m;
   while ((m = re.exec(text)) !== null) {
     const phone = normalizeUaPhone(m[0]);
-    if (!phone) continue;
+    if (!phone || !isPlausibleUaMobile(phone)) continue;
     const s = Math.max(0, m.index - 80);
     const e = Math.min(text.length, m.index + m[0].length + 80);
     if (/турист/i.test(text.slice(s, e)) && !seen.has(phone)) {
@@ -76,7 +130,8 @@ export function extractTouristPhones(text) {
 // "+" (e.g. an old stored value "380631706806") still matches the same number in
 // the thread written as "+380631706806". This is the dedup that prevents resending.
 export function phonesMissingFromText(phones, text) {
-  const present = new Set(extractPhones(text || ''));
+  // Lenient on purpose: anything number-shaped already in the thread counts as present.
+  const present = new Set(extractPhones(text || '', { strict: false }));
   const out = [];
   const seen = new Set();
   for (const p of phones || []) {

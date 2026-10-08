@@ -136,7 +136,8 @@ export class ItravelClient {
   async sendPhones(orderNo, phones, { dryRun }) {
     await this.openBookingMessages(orderNo);
     const thread = await this.readThreadText();
-    const present = new Set(extractPhones(thread));
+    // Lenient parse: any number already in the thread counts as present (no resend).
+    const present = new Set(extractPhones(thread, { strict: false }));
     const missing = (phones || []).filter((p) => !present.has(p));
     if (!missing.length) {
       await this.closeChat().catch(() => {});
@@ -161,7 +162,7 @@ export class ItravelClient {
     // success when the phone is actually visible in the cabinet thread.
     const after = await this.readThreadText();
     const tail = (v) => String(v || '').replace(/\D+/g, '').slice(-9);
-    const posted = new Set(extractPhones(after).map(tail));
+    const posted = new Set(extractPhones(after, { strict: false }).map(tail));
     const verified = missing.every((p) => posted.has(tail(p)));
     await this.closeChat().catch(() => {});
     if (!verified) {
