@@ -19,8 +19,9 @@ before(async () => {
 });
 afterEach(() => stop.resetStop());
 
-function fakeClient({ bookings, panel = {}, body = {}, onOpenChat } = {}) {
+function fakeClient({ bookings, panel = {}, body = {}, onOpenChat, closedDrawer = [], lateHistory = {} } = {}) {
   const calls = { openChat: [], sent: [] };
+  const checks = {};
   let chatId = null;
   return {
     calls,
@@ -35,8 +36,13 @@ function fakeClient({ bookings, panel = {}, body = {}, onOpenChat } = {}) {
       calls.openChat.push(id);
       if (onOpenChat) onOpenChat(id);
     },
+    async chatPanelVisible() {
+      return !closedDrawer.includes(chatId);
+    },
     async chatAlreadyRequested() {
-      const t = `${panel[chatId] || ''} ${body[chatId] || ''}`;
+      checks[chatId] = (checks[chatId] || 0) + 1;
+      if (lateHistory[chatId] && checks[chatId] === 1) return false; // history not loaded yet
+      const t = `${panel[chatId] || ''} ${body[chatId] || ''} ${lateHistory[chatId] || ''}`;
       return /телефон\s+турист/i.test(t);
     },
     async readChatPanelText() {
@@ -90,4 +96,18 @@ test('SIGTERM mid-cycle: the booking in progress is finished, the rest waits', a
   assert.deepEqual(c.calls.sent, ['73011']);
   assert.deepEqual(c.calls.openChat, ['73011']);
   assert.equal(s.interrupted, 'SIGTERM');
+});
+
+test('a chat that did not open is skipped, never messaged blind', async () => {
+  const c = fakeClient({ bookings: ['73021'], closedDrawer: ['73021'] });
+  const s = await runCycle({ makeClient: () => c });
+  assert.deepEqual(c.calls.sent, []);
+  assert.ok(s.errors.some((e) => /73021: chat did not open/.test(e)));
+});
+
+test('history that loads late is seen on the second look (no duplicate request)', async () => {
+  const c = fakeClient({ bookings: ['73031'], lateHistory: { 73031: 'Просимо надіслати телефон туристів' } });
+  const s = await runCycle({ makeClient: () => c });
+  assert.deepEqual(c.calls.sent, []);
+  assert.deepEqual(s.skippedAlready, ['73031']);
 });

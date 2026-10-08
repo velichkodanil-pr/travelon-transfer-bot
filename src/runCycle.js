@@ -10,6 +10,9 @@ import { runBusWarn } from './busWarn.js';
 import { runInsuranceDoc } from './insuranceRuby.js';
 import { reportEnabled, upsertRows, upsertBusWarnRows, writeBotStatus } from './report.js';
 
+const RECHECK_MS = 1500;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // deps are injectable for tests (fake browser client); production uses the defaults.
 export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps } = {}) {
   const startedAt = new Date();
@@ -64,7 +67,23 @@ export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps
 
         await client.openChat(b.id);
 
-        if (await client.chatAlreadyRequested()) {
+        // No chat drawer -> we cannot see the history, so we must not decide
+        // "not requested yet" (the check would fall back to the page body).
+        if (!(await client.chatPanelVisible())) {
+          summary.errors.push(`${b.id}: chat did not open — retry next cycle`);
+          log.warn(`Skip ${b.id}: chat drawer did not open (site slow?) — retry next cycle.`);
+          await client.closeChat(b.id).catch(() => {});
+          continue;
+        }
+
+        // The history loads asynchronously: look twice before deciding it is empty.
+        const requested = async () => {
+          if (await client.chatAlreadyRequested()) return true;
+          await sleep(RECHECK_MS);
+          return client.chatAlreadyRequested();
+        };
+
+        if (await requested()) {
           summary.skippedAlready.push(b.id);
           log.info(`Skip ${b.id}: transfer-phone request already present in chat.`);
           // Remember it, so the chat is not reopened every hour. Only when the
