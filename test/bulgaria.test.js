@@ -135,19 +135,30 @@ function fakeEline({ hangOn = null, portal = {} } = {}) {
   return { make, made };
 }
 
-function fakeItravel() {
+function fakeItravel({ failLogin = null } = {}) {
   const sent = [];
+  const made = [];
   return {
     sent,
-    make: () => ({
-      async init() {},
-      async login() {},
-      async sendPhones(orderNo, phones) {
-        sent.push({ orderNo, phones });
-        return { sent: true, verified: true, alreadyPresent: false, missing: phones, text: '' };
-      },
-      async close() {},
-    }),
+    made,
+    make: () => {
+      const client = {
+        closed: false,
+        async init() {},
+        async login() {
+          if (failLogin) throw new Error(failLogin);
+        },
+        async sendPhones(orderNo, phones) {
+          sent.push({ orderNo, phones });
+          return { sent: true, verified: true, alreadyPresent: false, missing: phones, text: '' };
+        },
+        async close() {
+          client.closed = true;
+        },
+      };
+      made.push(client);
+      return client;
+    },
   };
 }
 
@@ -238,4 +249,55 @@ test('a stop request finishes the current booking and leaves the rest', async ()
   assert.deepEqual(s.asked, ['72801'], 'the booking in progress still gets its message');
   assert.ok(!t.calls.openEdit.includes('72802'));
   assert.equal(s.interrupted, true);
+});
+
+test('a cabinet that will not let us in costs one booking, not the whole cycle', async () => {
+  // 03-04.11.2026: login failed once and the bot then opened all 86 Itravel bookings
+  // one by one (~18 s each) to hear "cabinet not logged in" — the cycle died on the
+  // 45-min watchdog seven times. The cabinet now drops out after the first failure.
+  const it = fakeItravel({ failLogin: '[Itravel] Login form not found (check ITRAVEL_LOGIN_URL / sel.itravel.login*)' });
+  const t = fakeTravelon({
+    rows: {
+      [ITRAVEL]: [row('72901', 'Itravel - 88001'), row('72902', 'Itravel - 88002'), row('72903', 'Itravel - 88003')],
+    },
+    comments: { 72901: 'тел 0501112233', 72902: 'тел 0661112233', 72903: 'тел 0671112233' },
+  });
+  const s = await runBulgaria(t, { makeEline: fakeEline().make, makeItravel: it.make });
+
+  assert.equal(it.made.length, 1, 'the cabinet is tried once, not once per booking');
+  assert.equal(it.made[0].closed, true, 'the half-open browser is closed');
+  assert.equal(it.sent.length, 0);
+  assert.match(s.itravelDown, /Login form not found/);
+  assert.deepEqual(s.itravelSkipped, ['72902', '72903'], 'the rest are skipped, not retried one by one');
+  assert.equal(s.errors.length, 1, 'one error for the failed login, not one per booking');
+  assert.match(s.errors[0], /^72901: Itravel message failed/);
+  assert.match(s.report, /Itravel: ❌ вхід у кабінет не вдався/);
+  assert.match(s.report, /без повідомлення 2 заявок: 72902, 72903/);
+
+  // The phone is in the booking comments, but the supplier has not got it: the
+  // bookings stay open for the next cycle.
+  const byId = Object.fromEntries(s.rows.map((r) => [r.bookingId, r.status]));
+  assert.equal(byId['72902'], 'Помилка — постачальник не отримав');
+
+  // Cabinet back up -> the same bookings go through on the next cycle.
+  const ok = fakeItravel();
+  const s2 = await runBulgaria(t, { makeEline: fakeEline().make, makeItravel: ok.make });
+  assert.equal(s2.itravelDown, null);
+  assert.deepEqual(
+    ok.sent.map((x) => x.orderNo),
+    ['88001', '88002', '88003']
+  );
+  assert.deepEqual(s2.errors, []);
+});
+
+test('a long skip list stays inside one Telegram message', async () => {
+  const ids = Array.from({ length: 20 }, (_, i) => `730${String(i).padStart(2, '0')}`);
+  const it = fakeItravel({ failLogin: 'Login form not found' });
+  const t = fakeTravelon({
+    rows: { [ITRAVEL]: ids.map((id, i) => row(id, `Itravel - 89${String(i).padStart(3, '0')}`)) },
+    comments: Object.fromEntries(ids.map((id) => [id, 'тел 0501112233'])),
+  });
+  const s = await runBulgaria(t, { makeEline: fakeEline().make, makeItravel: it.make });
+  assert.equal(s.itravelSkipped.length, 19, 'the first booking carries the error, the rest are skipped');
+  assert.match(s.report, / … \+4/, 'the id list is clipped');
 });

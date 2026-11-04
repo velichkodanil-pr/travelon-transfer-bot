@@ -197,6 +197,12 @@ async function writeToEline(booking, phones, summary, ensureEline, agentPhone) {
 }
 
 // deps are injectable for tests (fake portal clients); production uses the defaults.
+// Telegram caps a message at 4096 chars, and a dead cabinet can hold 90+ bookings:
+// keep the head of the list and count the rest.
+function idList(ids, max = 15) {
+  return ids.length <= max ? ids.join(', ') : `${ids.slice(0, max).join(', ')} … +${ids.length - max}`;
+}
+
 export async function runBulgaria(
   travelon,
   { makeEline = () => new ElineClient(), makeItravel = () => new ItravelClient() } = {}
@@ -211,6 +217,8 @@ export async function runBulgaria(
     reminded: [],
     waiting: [],
     waitingRef: [], // Itravel: phone known, order number not in the booking yet
+    itravelSkipped: [], // Itravel cabinet down this cycle -> booking left for the next one
+    itravelDown: null, // why the cabinet was skipped (login failure message)
     skippedDone: [],
     errors: [],
     interrupted: false,
@@ -378,12 +386,28 @@ export async function runBulgaria(
     }
   };
   let itravel = null;
+  // Why the cabinet is out for the rest of this cycle (login failure). Without this
+  // every later booking kept paying ~18 s for a doomed "cabinet not logged in".
+  let itravelDown = null;
+  const itravelSkipped = new Set();
   const ensureItravel = async () => {
+    if (itravelDown) throw new Error(itravelDown);
     if (itravel) return itravel;
     const client = makeItravel();
+    try {
+      await client.init();
+      await client.login();
+    } catch (err) {
+      // Half-open browser: close it instead of carrying it through the cycle.
+      await client.close?.().catch(() => {});
+      if (config.itravel.skipCycleOnLoginFail) {
+        itravelDown = `Itravel: вхід у кабінет не вдався (${err.message})`;
+        summary.itravelDown = err.message;
+        log.error(`[Itravel] вхід не вдався: ${err.message} — кабінет пропущено до кінця цього циклу.`);
+      }
+      throw err;
+    }
     itravel = client;
-    await client.init();
-    await client.login();
     return client;
   };
   const waitingRef = new Set();
@@ -409,6 +433,14 @@ export async function runBulgaria(
         waitingRef.add(c.id);
         summary.waitingRef.push(c.id);
         log.info(`[Itravel] ${c.id}: no Itravel order number in the booking yet — will message once it appears.`);
+      }
+      return false;
+    }
+    if (itravelDown) {
+      // Not an error per booking: one cabinet line in the summary covers them all.
+      if (!itravelSkipped.has(c.id)) {
+        itravelSkipped.add(c.id);
+        summary.itravelSkipped.push(c.id);
       }
       return false;
     }
@@ -751,6 +783,13 @@ export async function runBulgaria(
     `Matched: ${summary.matched.length} (${summary.matched.join(', ') || DASH})`,
     `Eline writes: ${summary.eline.join(', ') || DASH}`,
     `Itravel msgs: ${summary.itravel.join(', ') || DASH}`,
+    ...(summary.itravelDown
+      ? [
+          `Itravel: ❌ вхід у кабінет не вдався (${summary.itravelDown}) — кабінет пропущено до кінця циклу; без повідомлення ${summary.itravelSkipped.length} заявок${
+            summary.itravelSkipped.length ? `: ${idList(summary.itravelSkipped)}` : ''
+          }`,
+        ]
+      : []),
     `Waiting Itravel order №: ${summary.waitingRef.join(', ') || DASH}`,
     `Comment writes: ${summary.comments.join(', ') || DASH}`,
     `Asked: ${summary.asked.join(', ') || DASH}`,

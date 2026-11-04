@@ -190,6 +190,14 @@ export const config = {
   // the order's "Повідомлення" link and sends the tourist phone into the thread.
   itravel: {
     enabled: bool(process.env.BG_ITRAVEL_MESSAGE_ENABLED, true),
+    // 03-04.11.2026: the cabinet stopped letting the bot in (from the hosting IP the
+    // login page comes back without a form). The login failed once per cycle and then
+    // EVERY remaining Bulgarian booking was still opened one by one, ~18 s each, only
+    // to end in "cabinet not logged in": seven cycles in a row ran past the 45-min
+    // watchdog, and after the last one Railway stopped restarting the bot at all.
+    // Now the first login failure marks the cabinet down for the rest of the cycle.
+    // ITRAVEL_SKIP_CYCLE_ON_LOGIN_FAIL=false restores the old behaviour.
+    skipCycleOnLoginFail: bool(process.env.ITRAVEL_SKIP_CYCLE_ON_LOGIN_FAIL, true),
     email: process.env.ITRAVEL_EMAIL || '',
     password: process.env.ITRAVEL_PASSWORD || '',
     baseUrl: (process.env.ITRAVEL_BASE_URL || 'https://www.i-travel.com.ua').replace(/\/$/, ''),
