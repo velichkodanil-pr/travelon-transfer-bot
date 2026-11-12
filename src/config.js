@@ -219,6 +219,11 @@ export const config = {
     email: process.env.ITRAVEL_EMAIL || '',
     password: process.env.ITRAVEL_PASSWORD || '',
     baseUrl: (process.env.ITRAVEL_BASE_URL || 'https://www.i-travel.com.ua').replace(/\/$/, ''),
+    // Primary login = the site's popup endpoint (wp-login.php is 403 for the bot's
+    // IP since 03.11.2026); the form's own action is used when present on the page.
+    modalLoginUrl:
+      process.env.ITRAVEL_MODAL_LOGIN_URL ||
+      'https://www.i-travel.com.ua/wp-content/themes/travel-time/profile/login_user.php',
     loginUrl: process.env.ITRAVEL_LOGIN_URL || 'https://www.i-travel.com.ua/wp-login.php',
     profilePath: process.env.ITRAVEL_PROFILE_PATH || '/client-profile/',
     messageText:

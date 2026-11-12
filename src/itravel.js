@@ -69,16 +69,34 @@ export class ItravelClient {
       log.info('[Itravel] Already authenticated.');
       return;
     }
-    // 2) Submit the WordPress login form (wp-login.php: log / pwd / wp-submit).
+    // 2) The site's own login popup (#modalloginform, on every page) posts via AJAX
+    //    to the theme's profile/login_user.php — NOT wp-login.php. Since 03.11.2026
+    //    the hosting answers wp-login.php with "403 Forbidden" for the bot's egress
+    //    IP (Railway, AWS us-west), so this is the primary path now.
+    const modal = await this.loginViaModal();
+    if (modal.ok) {
+      await this.page.goto(this.profileUrl(), { waitUntil: 'domcontentloaded' });
+      await this.page.waitForTimeout(1200);
+      if (await this.isLoggedIn()) {
+        log.info('[Itravel] Login OK (site login popup).');
+        return;
+      }
+      log.warn('[Itravel] popup login answered OK, but the profile is not authenticated — trying wp-login.php.');
+    } else {
+      log.warn(`[Itravel] popup login failed (${modal.why}) — trying wp-login.php.`);
+    }
+
+    // 3) Fallback: the standard WordPress form (wp-login.php: log / pwd / wp-submit).
     const resp = await this.page.goto(config.itravel.loginUrl, { waitUntil: 'domcontentloaded' });
     await this.page.waitForTimeout(1000);
     const e = await this.firstExisting(sel.itravel.loginEmail);
     const p = await this.firstExisting(sel.itravel.loginPassword);
     if (!e || !p) {
-      // Since 03.11.2026 the hosting serves wp-login.php WITHOUT the form to the bot,
-      // while from Ukraine and from other clouds the form is there. Say exactly what
-      // came back (and from which egress IP), so it can be taken to the supplier.
-      throw new Error(`[Itravel] Login form not found — ${await this.describePage(resp)}`);
+      // Say exactly what came back (and from which egress IP), so it can be taken
+      // to the supplier.
+      throw new Error(
+        `[Itravel] Login form not found — popup: ${modal.why || 'ok, not authenticated'}; wp-login.php: ${await this.describePage(resp)}`
+      );
     }
     await e.fill(config.itravel.email);
     await p.fill(config.itravel.password);
@@ -87,13 +105,61 @@ export class ItravelClient {
     else await p.press('Enter');
     await this.page.waitForLoadState('domcontentloaded').catch(() => {});
     await this.page.waitForTimeout(2500);
-    // 3) Verify by loading the profile page (wp-login redirects elsewhere on success).
+    // Verify by loading the profile page (wp-login redirects elsewhere on success).
     await this.page.goto(this.profileUrl(), { waitUntil: 'domcontentloaded' });
     await this.page.waitForTimeout(1200);
     if (!(await this.isLoggedIn())) {
       throw new Error('[Itravel] Login failed (profile marker not found after submit)');
     }
     log.info('[Itravel] Login OK.');
+  }
+
+  // Log in exactly like the site's popup does (auth.js): POST user_login/user_pass,
+  // urlencoded, X-Requested-With; the answer is JSON {status: 200 | 'admin'} on
+  // success, an error text otherwise. Returns { ok, why }.
+  async loginViaModal() {
+    const home = `${config.itravel.baseUrl}/`;
+    const resp = await this.page.goto(home, { waitUntil: 'domcontentloaded' }).catch((err) => {
+      log.warn(`[Itravel] home page did not load: ${err.message}`);
+      return null;
+    });
+    if (!resp) return { ok: false, why: 'home page did not load' };
+    if (resp.status() >= 400) return { ok: false, why: `home page HTTP ${resp.status()}` };
+    const res = await this.page
+      .evaluate(
+        async ({ fallbackUrl, user, pass }) => {
+          try {
+            const form = document.getElementById('modalloginform');
+            const url = (form && form.action) || fallbackUrl;
+            const r = await fetch(url, {
+              method: 'POST',
+              body: new URLSearchParams({ user_login: user, user_pass: pass }),
+              credentials: 'include',
+              headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            });
+            const txt = await r.text();
+            let status = null;
+            try {
+              status = JSON.parse(txt).status;
+            } catch (_) {
+              /* not JSON: an error message */
+            }
+            return {
+              http: r.status,
+              status: status == null ? null : String(status),
+              txt: txt.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160),
+            };
+          } catch (e) {
+            return { http: 0, error: String(e) };
+          }
+        },
+        { fallbackUrl: config.itravel.modalLoginUrl, user: config.itravel.email, pass: config.itravel.password }
+      )
+      .catch((e) => ({ http: 0, error: String(e) }));
+    if (res.error) return { ok: false, why: res.error };
+    if (res.http >= 400) return { ok: false, why: `HTTP ${res.http}` };
+    if (res.status === '200' || res.status === 'admin') return { ok: true };
+    return { ok: false, why: `answer "${res.txt || res.status || ''}"` };
   }
 
   // One line about the page we got instead of the login form: HTTP status, final
