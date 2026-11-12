@@ -392,17 +392,153 @@ export class TravelonClient {
     }
 
     // Wait for the drawer that mentions this booking id, then for the composer
-    // textarea so the caller can compose immediately.
+    // textarea so the caller can compose immediately. (The drawer header is
+    // "Оповіщення по заявці <id>" since the UI went Ukrainian; "request <id>" kept.)
     await this.page
-      .getByText(new RegExp(`request\\s*${id}`, 'i'))
+      .getByText(new RegExp(`(?:request|заявці|заявке)\\s*${id}`, 'i'))
       .first()
       .waitFor({ timeout: 8000 })
       .catch(() => {});
     await this.firstExisting(sel.chat.textArea, { timeout: 4000 });
     await this.page.waitForTimeout(500);
+    this.chatBundleId = String(id); // sendChatMessage posts to this booking
+  }
+
+  // ---- Fast reads (no navigation) -------------------------------------------
+  // The chat drawer renders GET /book/bundle_notifies/chat-detail/<id> (JSON).
+  // Reading it directly takes ~0.3 s instead of ~10 s (back to the list, open the
+  // drawer, wait for it). Returns the messages as plain text (one per line block,
+  // newest last), or null when the feed can't be read — the caller then opens
+  // the drawer as before.
+  async fetchChatNotifies(id) {
+    const res = await this.page
+      .evaluate(async (bundleId) => {
+        try {
+          const r = await fetch(`/book/bundle_notifies/chat-detail/${bundleId}`, {
+            headers: { 'X-Requested-With': 'XMLHttpRequest', Accept: 'application/json' },
+            credentials: 'include',
+          });
+          if (!r.ok) return { error: `http ${r.status}` };
+          const j = await r.json().catch(() => null);
+          if (!j || !Array.isArray(j.notifies)) return { error: 'no notifies[] in response' };
+          const toText = (html) => {
+            if (!html) return '';
+            const doc = new DOMParser().parseFromString(
+              String(html).replace(/<br\s*\/?>/gi, '\n'),
+              'text/html'
+            );
+            return (doc.body && doc.body.textContent) || '';
+          };
+          return {
+            items: j.notifies.map((n) => ({
+              text: [toText(n.title), toText(n.message)].filter(Boolean).join('\n'),
+              createdAt: n.created_at || '',
+              theme: n.message_theme == null ? '' : String(n.message_theme),
+            })),
+          };
+        } catch (e) {
+          return { error: String(e) };
+        }
+      }, Number(id))
+      .catch((e) => ({ error: String(e) }));
+    if (!res || res.error) {
+      log.warn(`[chat] ${id}: chat feed unreadable (${res && res.error}) — falling back to the drawer.`);
+      return null;
+    }
+    return res.items;
+  }
+
+  async readChatTextFast(id) {
+    if (!config.fastReads) return null;
+    const items = await this.fetchChatNotifies(id);
+    return items ? items.map((n) => n.text).join('\n') : null;
+  }
+
+  // Comment fields + the agent's Telephone straight from the edit page's HTML
+  // (server-rendered; ~1 s fetch, no rendering). null when the fields are not in
+  // the HTML (redirect to sign-in, layout change) — the caller uses openEdit().
+  async readEditFieldsFast(id) {
+    if (!config.fastReads) return null;
+    const res = await this.page
+      .evaluate(
+        async ({ url, cu, ca }) => {
+          try {
+            const r = await fetch(url, { credentials: 'include' });
+            if (!r.ok) return { error: `http ${r.status}` };
+            const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+            const user = doc.querySelector(cu);
+            const admin = doc.querySelector(ca);
+            if (!user || !admin) return { error: 'comment fields not in the page HTML' };
+            const tel = doc.querySelector('input[name="bundle[telephone]"]');
+            return { user: user.value || '', admin: admin.value || '', telephone: tel ? tel.value || '' : '' };
+          } catch (e) {
+            return { error: String(e) };
+          }
+        },
+        { url: this.editUrl(id), cu: sel.edit.commentUser, ca: sel.edit.commentAdmin }
+      )
+      .catch((e) => ({ error: String(e) }));
+    if (!res || res.error) {
+      log.warn(`[edit] ${id}: fast read failed (${res && res.error}) — opening the page.`);
+      return null;
+    }
+    return res;
+  }
+
+  // Did a message that starts like `message` land in the booking's chat? true /
+  // false, or null when the feed can't be read. Compared on letters and digits
+  // only: the site prefixes "Повідомлення по заявці N", turns newlines into <br>
+  // and may entity-encode quotes.
+  async chatHasMessage(id, message) {
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+    const want = norm(message).slice(0, 60);
+    if (!want) return null;
+    const items = await this.fetchChatNotifies(id);
+    if (!items) return null;
+    return items.some((n) => norm(n.text).includes(want));
+  }
+
+  // The chat Send button does NOT fire under browser automation: every click is a
+  // silent no-op (proved on the avia bot 2026-06-19; this bot logged "sent" for
+  // weeks while nothing reached the chats). So post exactly what the working UI
+  // posts: POST /book/bundle_notifies/create, multipart, CSRF token in a header.
+  async postChatMessage({ bundleId, message, forAdmin, deptId, typeId }) {
+    return this.page
+      .evaluate(
+        async ({ bundleId, message, forAdmin, deptId, typeId }) => {
+          try {
+            const fd = new FormData();
+            fd.append('bundle_id', String(bundleId));
+            fd.append('message', message);
+            fd.append('for_admin', forAdmin ? 'true' : 'false');
+            fd.append('type', String(typeId));
+            fd.append('departament_id', String(deptId));
+            fd.append('provider_id', '0');
+            fd.append('remote_order', 'undefined');
+            fd.append('reply_to_id', 'undefined');
+            const tok = (document.querySelector('meta[name="csrf-token"]') || {}).content || '';
+            const r = await fetch('/book/bundle_notifies/create', {
+              method: 'POST',
+              body: fd,
+              credentials: 'include',
+              headers: tok ? { 'X-CSRF-Token': tok } : {},
+            });
+            let txt = '';
+            try {
+              txt = (await r.text()).slice(0, 120);
+            } catch (_) {}
+            return { ok: r.ok, status: r.status, txt };
+          } catch (e) {
+            return { ok: false, status: 0, error: String(e) };
+          }
+        },
+        { bundleId, message, forAdmin, deptId, typeId }
+      )
+      .catch((e) => ({ ok: false, status: 0, error: String(e) }));
   }
 
   async closeChat(/* id */) {
+    this.chatBundleId = null; // never post into a drawer we have closed
     // The chat is a modal — close via its close button or Escape. Do NOT click the
     // row icon again: that re-emits 'chatbox:open' and would just re-open the modal.
     const close = await this.firstExisting(sel.chat.closeButton, { timeout: 1000 });
@@ -438,7 +574,9 @@ export class TravelonClient {
   // The composer is a JS modal: the department <select> is present first; the SUBJECT
   // <select> renders only AFTER a department is chosen; Send enables once department +
   // subject + text are all set. "To everyone" is the default recipient.
-  async sendChatMessage({ department, subject, text, audience = 'everyone', fallbackText }) {
+  async sendChatMessage({ department, subject, text, audience = 'everyone', fallbackText, bundleId }) {
+    const targetId = String(bundleId || this.chatBundleId || '');
+    if (!targetId) throw new Error('sendChatMessage: no booking id (open the chat first).');
     const dept = await this.firstExisting(sel.chat.departmentSelect, { timeout: 6000 });
     const area = await this.firstExisting(sel.chat.textArea, { timeout: 3000 });
     if (!dept || !area) {
@@ -488,52 +626,43 @@ export class TravelonClient {
       throw new Error('Composer text empty before send — aborting (not marking sent).');
     }
 
-    // 4) Recipient. "To everyone" is selected by default, so only act when we need
-    //    administrators (clicking the already-active toggle could clear it).
-    if (audience === 'administrators') {
-      const admins = await this.firstExisting(sel.chat.toAdministratorsButton, { timeout: 1500 });
-      if (admins) await admins.click().catch(() => {});
+    // 4) Transmit. The UI Send button never fires under automation (see
+    //    postChatMessage), so read the ids the composer resolved for the chosen
+    //    department/subject and post the composed text directly. The recipient
+    //    toggle is not clicked any more: for_admin carries it.
+    const deptId = (await dept.evaluate((el) => el.value).catch(() => '')) || '';
+    const typeId = (await subj.evaluate((el) => el.value).catch(() => '')) || '';
+    if (!deptId || !typeId) {
+      await this.screenshot('composer-missing-ids');
+      throw new Error(
+        `Chat send: department/subject id not resolved (dept=${deptId || '-'} type=${typeId || '-'}) — not sent.`
+      );
     }
-
-    // 5) Send — the button enables once department + subject + text are all set.
-    const send = await this.firstExisting(sel.chat.sendButton, { timeout: 5000 });
-    if (!send) {
-      await this.screenshot('composer-send-not-found');
-      // Diagnostics: the drawer's real button captions, so a caption change can be
-      // fixed from the logs instead of guessing a second time.
-      let captions = '';
-      try {
-        const panel = await this.firstExisting(sel.chat.panel, { timeout: 1000 });
-        if (panel) {
-          const texts = await panel
-            .locator('button, input[type="submit"], [role="button"]')
-            .evaluateAll((els) =>
-              els
-                .map((el) =>
-                  (el.innerText || el.value || el.getAttribute('aria-label') || '')
-                    .replace(/\s+/g, ' ')
-                    .trim()
-                )
-                .filter(Boolean)
-                .slice(0, 25)
-            )
-            .catch(() => []);
-          captions = texts.join(' | ');
-        }
-      } catch {
-        /* diagnostics only */
-      }
-      log.warn(`[chat] send button not found; drawer buttons: ${captions || '(none)'}`);
-      throw new Error('Send button not found — verify sel.chat.sendButton.');
-    }
-    await send.scrollIntoViewIfNeeded().catch(() => {});
-    await send.click({ timeout: 6000 }).catch(async () => {
-      await send.click({ timeout: 3000, force: true });
+    const res = await this.postChatMessage({
+      bundleId: targetId,
+      message: beforeSend,
+      forAdmin: audience === 'administrators',
+      deptId,
+      typeId,
     });
-    await this.page.waitForTimeout(1800);
-    // NOTE: TravelON does NOT clear the composer after a successful send, so we
-    // can't treat a non-empty box as failure — the pre-send non-empty check above
-    // is the safeguard against sending an empty message.
+    log.info(
+      `[chat] POST create -> status=${res.status} ok=${res.ok}${res.error ? ` err=${res.error}` : ''} ` +
+        `(bundle=${targetId} dept=${deptId} type=${typeId})`
+    );
+    if (!res.ok) {
+      await this.screenshot('chat-post-failed');
+      throw new Error(`Chat send failed: POST /book/bundle_notifies/create -> ${res.status} ${res.error || res.txt || ''}`.trim());
+    }
+    // 5) Confirm it is really in the chat — "sent" must never again mean "clicked".
+    let landed = await this.chatHasMessage(targetId, beforeSend);
+    if (landed === false) {
+      await this.page.waitForTimeout(2000);
+      landed = await this.chatHasMessage(targetId, beforeSend);
+    }
+    if (landed === false) {
+      throw new Error('Chat send: POST returned OK but the message is not in the chat feed — not marking sent.');
+    }
+    if (landed === null) log.warn(`[chat] ${targetId}: sent (POST ${res.status}), but the chat feed could not be re-read to confirm.`);
     return true;
   }
 

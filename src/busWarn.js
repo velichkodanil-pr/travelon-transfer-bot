@@ -111,22 +111,42 @@ export async function runBusWarn(travelon) {
     }
     try {
       const w = await getBusWarn(c.id);
+      // Chat feed read once (~0.3 s, no navigation); null = unreadable.
+      let feed;
+      const readFeed = async () => {
+        if (feed === undefined) feed = travelon.readChatTextFast ? await travelon.readChatTextFast(c.id) : null;
+        return feed;
+      };
       if (w?.warnedAt && !config.dryRun) {
-        summary.skippedDone.push(c.id);
-        summary.rows.push(bwRow(c, 'Надіслано раніше'));
-        continue;
+        // GHOST_RECHECK: an earlier "send" may never have reached the chat.
+        let ghost = false;
+        if (config.ghostRecheck && w.source !== 'chat-existing') {
+          const f = await readFeed();
+          ghost = f !== null && !BUSWARN_PATTERNS.some((re) => re.test(f));
+        }
+        if (!ghost) {
+          summary.skippedDone.push(c.id);
+          summary.rows.push(bwRow(c, 'Надіслано раніше'));
+          continue;
+        }
+        log.info(`[BusWarn] ${c.id}: recorded as sent, but the warning is not in the chat — sending again.`);
       }
       if (!config.dryRun && sends >= config.busWarn.maxSendsPerRun) {
         log.warn(`[BusWarn] reached maxSendsPerRun=${config.busWarn.maxSendsPerRun}; rest next cycle.`);
         break;
       }
-      await travelon.openChat(c.id);
-      const chatText = await travelon.readChatPanelText();
+      let chatOpen = false;
+      let chatText = await readFeed();
+      if (chatText === null) {
+        await travelon.openChat(c.id);
+        chatOpen = true;
+        chatText = await travelon.readChatPanelText();
+      }
       if (BUSWARN_PATTERNS.some((re) => re.test(chatText))) {
         summary.alreadyInChat.push(c.id);
         summary.rows.push(bwRow(c, 'Вже в чаті'));
         if (!config.dryRun) await setBusWarn(c.id, { warnedAt: new Date().toISOString(), source: 'chat-existing' });
-        await travelon.closeChat(c.id).catch(() => {});
+        if (chatOpen) await travelon.closeChat(c.id).catch(() => {});
         continue;
       }
       if (config.dryRun) {
@@ -134,10 +154,15 @@ export async function runBusWarn(travelon) {
         log.info(`[BusWarn] ${c.id}: WOULD send bus warning (${c.supplier}).`);
         summary.rows.push(bwRow(c, 'DRY-RUN: надіслав би', 'DRY-RUN'));
       } else {
+        if (!chatOpen) {
+          await travelon.openChat(c.id);
+          chatOpen = true;
+        }
         await travelon.sendChatMessage({
           department: config.busWarn.department,
           subject: config.busWarn.subject,
           text: BUSWARN_TEXT,
+          bundleId: c.id,
         });
         summary.warned.push(c.id);
         sends += 1;
@@ -145,7 +170,7 @@ export async function runBusWarn(travelon) {
         log.info(`[BusWarn] ${c.id}: sent bus warning (${c.supplier}).`);
         summary.rows.push(bwRow(c, 'Надіслано'));
       }
-      await travelon.closeChat(c.id).catch(() => {});
+      if (chatOpen) await travelon.closeChat(c.id).catch(() => {});
     } catch (err) {
       summary.errors.push(`${c.id}: ${err.message}`);
       log.error(`[BusWarn] ${c.id} failed:`, err.message);

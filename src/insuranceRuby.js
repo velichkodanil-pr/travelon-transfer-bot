@@ -187,8 +187,17 @@ export async function runInsuranceDoc(travelon) {
     try {
       const st = await getInsDoc(c.id);
       if (st && st.checkedAt) {
-        summary.skippedDone.push(c.id);
-        continue;
+        // GHOST_RECHECK: a request recorded as SENT may never have reached the chat.
+        let ghost = false;
+        if (config.ghostRecheck && !dry && st.sentAt && st.source !== 'chat-existing' && travelon.readChatTextFast) {
+          const f = await travelon.readChatTextFast(c.id);
+          ghost = f !== null && !askedPatterns.some((re) => re.test(f));
+        }
+        if (!ghost) {
+          summary.skippedDone.push(c.id);
+          continue;
+        }
+        log.info(`[InsDoc] ${c.id}: recorded as sent, but the request is not in the chat — checking again.`);
       }
       if (checks >= cfg.maxChecksPerRun) {
         log.warn(`[InsDoc] reached maxChecksPerRun=${cfg.maxChecksPerRun}; rest next cycle.`);
@@ -205,8 +214,19 @@ export async function runInsuranceDoc(travelon) {
       }
       // A RU/BY tourist is present. Never ask twice: skip when the chat already holds a
       // documents request (ІПН, посвідка про постійне проживання тощо).
-      await travelon.openChat(c.id);
-      const chatText = await travelon.readChatPanelText();
+      // Chat feed (~0.3 s, no navigation); the drawer only if the feed fails or to send.
+      let chatOpen = false;
+      let chatText = travelon.readChatTextFast ? await travelon.readChatTextFast(c.id) : null;
+      if (chatText === null) {
+        await travelon.openChat(c.id);
+        chatOpen = true;
+        chatText = await travelon.readChatPanelText();
+      }
+      const closeChatIfOpen = async () => {
+        if (!chatOpen) return;
+        chatOpen = false;
+        await travelon.closeChat(c.id).catch(() => {});
+      };
       if (askedPatterns.some((re) => re.test(chatText))) {
         summary.alreadyAsked.push(c.id);
         summary.rows.push(mkRow(c.id, 'Вже запитано в чаті', hit));
@@ -219,25 +239,29 @@ export async function runInsuranceDoc(travelon) {
             source: 'chat-existing',
           });
         }
-        await travelon.closeChat(c.id).catch(() => {});
+        await closeChatIfOpen();
         continue;
       }
       if (dry) {
         summary.sent.push(`${c.id}(${hit})`);
         summary.rows.push(mkRow(c.id, 'DRY-RUN: надіслав би', hit, 'DRY-RUN'));
         log.info(`[InsDoc] ${c.id}: WOULD send doc-request (nationality ${hit}). [${nats.join(',')}]`);
-        await travelon.closeChat(c.id).catch(() => {});
+        await closeChatIfOpen();
         continue; // do NOT persist in dry-run, so LIVE can pick it up later
       }
       if (sends >= cfg.maxSendsPerRun) {
         log.warn(`[InsDoc] reached maxSendsPerRun=${cfg.maxSendsPerRun}; rest next cycle.`);
-        await travelon.closeChat(c.id).catch(() => {});
+        await closeChatIfOpen();
         break;
       }
       // Subject "Запит документів для громадянина рф/рб" auto-fills its template body,
       // so we pass an empty text and let sendChatMessage send the template.
-      await travelon.sendChatMessage({ department: cfg.department, subject: cfg.subject, text: '' });
-      await travelon.closeChat(c.id).catch(() => {});
+      if (!chatOpen) {
+        await travelon.openChat(c.id);
+        chatOpen = true;
+      }
+      await travelon.sendChatMessage({ department: cfg.department, subject: cfg.subject, text: '', bundleId: c.id });
+      await closeChatIfOpen();
       await setInsDoc(c.id, {
         checkedAt: new Date().toISOString(),
         sentAt: new Date().toISOString(),

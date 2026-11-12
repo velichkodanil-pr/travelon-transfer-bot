@@ -54,17 +54,66 @@ export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps
       }
       try {
         const prev = await getSent(b.id);
+        // Read the chat feed once (~0.3 s, no navigation); null = unreadable.
+        let feed;
+        const readFeed = async () => {
+          if (feed === undefined) feed = client.readChatTextFast ? await client.readChatTextFast(b.id) : null;
+          return feed;
+        };
         if (prev) {
-          if (prev.source === 'chat-existing') {
-            summary.skippedAlready.push(b.id);
-            log.info(`Skip ${b.id}: request already in chat (remembered).`);
-          } else {
-            summary.skippedStore.push(b.id);
-            log.info(`Skip ${b.id}: already messaged on a previous run.`);
+          // GHOST_RECHECK: our earlier "send" may never have reached the chat.
+          let ghost = false;
+          if (config.ghostRecheck && !config.dryRun && prev.source !== 'chat-existing') {
+            const f = await readFeed();
+            ghost = f !== null && !ALREADY_SENT_PATTERNS.some((re) => re.test(f));
           }
+          if (!ghost) {
+            if (prev.source === 'chat-existing') {
+              summary.skippedAlready.push(b.id);
+              log.info(`Skip ${b.id}: request already in chat (remembered).`);
+            } else {
+              summary.skippedStore.push(b.id);
+              log.info(`Skip ${b.id}: already messaged on a previous run.`);
+            }
+            continue;
+          }
+          log.info(`${b.id}: recorded as sent, but the request is not in the chat — sending again.`);
+        }
+
+        // Fast path: decide from the chat feed, open the drawer only to send.
+        if ((await readFeed()) !== null) {
+          if (ALREADY_SENT_PATTERNS.some((re) => re.test(feed))) {
+            summary.skippedAlready.push(b.id);
+            log.info(`Skip ${b.id}: transfer-phone request already present in chat.`);
+            if (!config.dryRun) await markSent(b.id, { country: b.country, source: 'chat-existing' });
+            continue;
+          }
+          if (config.dryRun) {
+            summary.wouldSend.push(b.id);
+            log.info(`[DRY-RUN] Would send to ${b.id} (${b.country}).`);
+            continue;
+          }
+          if (sends >= config.maxSendsPerRun) {
+            log.warn(`Reached MAX_SENDS_PER_RUN=${config.maxSendsPerRun}; stopping sends.`);
+            break;
+          }
+          await client.openChat(b.id);
+          if (!(await client.chatPanelVisible())) {
+            summary.errors.push(`${b.id}: chat did not open — retry next cycle`);
+            log.warn(`Skip ${b.id}: chat drawer did not open (site slow?) — retry next cycle.`);
+            await client.closeChat(b.id).catch(() => {});
+            continue;
+          }
+          await client.sendMessage();
+          await markSent(b.id, { country: b.country });
+          sends += 1;
+          summary.sent.push(b.id);
+          log.info(`Sent to ${b.id} (${b.country}).`);
+          await client.closeChat(b.id);
           continue;
         }
 
+        // Fallback (feed unreadable): the drawer, exactly as before.
         await client.openChat(b.id);
 
         // No chat drawer -> we cannot see the history, so we must not decide

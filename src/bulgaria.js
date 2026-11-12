@@ -220,6 +220,7 @@ export async function runBulgaria(
     itravelSkipped: [], // Itravel cabinet down this cycle -> booking left for the next one
     itravelDown: null, // why the cabinet was skipped (login failure message)
     skippedDone: [],
+    ghosts: [], // stored as asked, but the ask is not in the chat (GHOST_RECHECK)
     errors: [],
     interrupted: false,
     rows: [], // per-booking rows for the Google Sheet report
@@ -467,6 +468,8 @@ export async function runBulgaria(
     return res.sent; // dry-run -> not yet messaged
   };
 
+  let sends = 0; // asks + reminders actually posted this cycle
+  let capWarned = false;
   try {
     for (const [idx, c] of candidates.entries()) {
       if (stopRequested()) {
@@ -535,11 +538,21 @@ export async function runBulgaria(
           continue;
         }
 
-        // (a) phone already in the comment fields?
-        await travelon.openEdit(c.id);
-        const comments = await travelon.readComments();
+        // (a) phone already in the comment fields? Read them from the page HTML
+        // (~1 s) and open the page only when that fails (~8 s).
+        const fastEdit = travelon.readEditFieldsFast ? await travelon.readEditFieldsFast(c.id) : null;
+        let comments;
+        let agentRaw;
+        if (fastEdit) {
+          comments = { user: fastEdit.user, admin: fastEdit.admin };
+          agentRaw = fastEdit.telephone;
+        } else {
+          await travelon.openEdit(c.id);
+          comments = await travelon.readComments();
+          agentRaw = await travelon.readAgentPhone();
+        }
         // The booking Telephone field is the AGENT's number — never the tourist's.
-        const agentPhone = normalizeUaPhone(await travelon.readAgentPhone());
+        const agentPhone = normalizeUaPhone(agentRaw);
         let phones = extractPhones(`${comments.user} ${comments.admin}`).filter(
           (p) => p !== agentPhone
         );
@@ -597,12 +610,29 @@ export async function runBulgaria(
         }
 
         // (b) phone in the chat? Any number written by the agent in the chat panel
-        // counts as the tourist's (per operator guidance). Read the PANEL only.
-        await travelon.openChat(c.id);
-        const chatText = await travelon.readChatPanelText();
+        // counts as the tourist's (per operator guidance). Read the chat MESSAGES
+        // only: from the chat feed (~0.3 s) or, if that fails, from the drawer.
+        // The drawer is opened only when something has to be sent.
+        let chatOpen = false;
+        const openChatIfNeeded = async () => {
+          if (chatOpen) return;
+          await travelon.openChat(c.id);
+          chatOpen = true;
+        };
+        const closeChatIfOpen = async () => {
+          if (!chatOpen) return;
+          chatOpen = false;
+          await travelon.closeChat(c.id).catch(() => {});
+        };
+        let chatText = travelon.readChatTextFast ? await travelon.readChatTextFast(c.id) : null;
+        const chatFromFeed = chatText !== null;
+        if (!chatFromFeed) {
+          await openChatIfNeeded();
+          chatText = await travelon.readChatPanelText();
+        }
         phones = extractPhones(chatText).filter((p) => p !== agentPhone);
         if (phones.length) {
-          await travelon.closeChat(c.id).catch(() => {});
+          await closeChatIfOpen();
           await travelon.openEdit(c.id);
           const res = await travelon.appendPhonesToComments(phones, { dryRun: config.dryRun });
           summary.comments.push(`${c.id}${res.saved ? '' : ' (dry)'}`);
@@ -685,7 +715,7 @@ export async function runBulgaria(
                 ', '
               )}] — marking done, no ask.`
             );
-            await travelon.closeChat(c.id).catch(() => {});
+            await closeChatIfOpen();
             await persist(c.id, {
               doneAt: new Date().toISOString(),
               phones: elinePhones,
@@ -706,24 +736,56 @@ export async function runBulgaria(
         }
 
         // (c) nowhere -> ask / remind
-        const asked = BG_ASK_PATTERNS.some((re) => re.test(chatText)) || Boolean(w?.askedAt);
-        const reminded =
-          BG_REMINDER_PATTERNS.some((re) => re.test(chatText)) || Boolean(w?.remindedAt);
+        const askInChat = BG_ASK_PATTERNS.some((re) => re.test(chatText));
+        const remindInChat = BG_REMINDER_PATTERNS.some((re) => re.test(chatText));
+        // A stored ask the chat feed does not hold was never delivered (until 11.2026
+        // every send was a silent no-op). Only trusted on a complete feed read.
+        const ghost =
+          config.ghostRecheck &&
+          !config.dryRun &&
+          chatFromFeed &&
+          Boolean(w?.askedAt) &&
+          !askInChat &&
+          !remindInChat;
+        if (ghost) summary.ghosts.push(c.id);
+        const asked = askInChat || (Boolean(w?.askedAt) && !ghost);
+        const reminded = remindInChat || (Boolean(w?.remindedAt) && !ghost);
+        const wantsSend = !asked || (!reminded && shouldRemindNow(w?.askedAt));
+        const capped = wantsSend && !config.dryRun && sends >= config.bulgaria.maxSendsPerRun;
+        if (capped && !capWarned) {
+          capWarned = true;
+          log.warn(`[BG] reached BG_MAX_SENDS_PER_RUN=${config.bulgaria.maxSendsPerRun}; the rest next cycle.`);
+        }
 
-        if (!asked) {
+        if (capped) {
+          summary.waiting.push(c.id);
+          summary.rows.push(
+            mkRow(c, {
+              phonePresent: 'ні',
+              asked: asked ? 'так' : 'ні',
+              status: 'Очікує — ліміт надсилань циклу',
+              note: 'запит/нагадування піде наступного циклу',
+            })
+          );
+        } else if (!asked) {
           if (config.dryRun) {
             summary.asked.push(`${c.id} (dry)`);
             log.info(`[BG] ${c.id}: WOULD ask agent for tourist phone.`);
           } else {
+            await openChatIfNeeded();
             await travelon.sendChatMessage({
               department: config.bulgaria.department,
               subject: config.bulgaria.subject,
               text: config.bulgaria.askText,
+              bundleId: c.id,
             });
+            sends += 1;
             summary.asked.push(c.id);
-            log.info(`[BG] ${c.id}: asked agent for tourist phone.`);
+            log.info(
+              `[BG] ${c.id}: asked agent for tourist phone${ghost ? ' (the earlier ask never reached the chat)' : ''}.`
+            );
           }
-          await persist(c.id, { askedAt: new Date().toISOString() });
+          await persist(c.id, { askedAt: new Date().toISOString(), ...(ghost ? { remindedAt: null } : {}) });
           summary.rows.push(
             mkRow(c, {
               phonePresent: 'ні',
@@ -737,11 +799,14 @@ export async function runBulgaria(
             summary.reminded.push(`${c.id} (dry)`);
             log.info(`[BG] ${c.id}: WOULD send reminder.`);
           } else {
+            await openChatIfNeeded();
             await travelon.sendChatMessage({
               department: config.bulgaria.department,
               subject: config.bulgaria.subject,
               text: config.bulgaria.reminderText,
+              bundleId: c.id,
             });
+            sends += 1;
             summary.reminded.push(c.id);
             log.info(`[BG] ${c.id}: sent reminder.`);
           }
@@ -765,7 +830,7 @@ export async function runBulgaria(
             })
           );
         }
-        await travelon.closeChat(c.id).catch(() => {});
+        await closeChatIfOpen();
       } catch (err) {
         summary.errors.push(`${c.id}: ${err.message}`);
         log.error(`[BG] booking ${c.id} failed:`, err.message);
@@ -795,6 +860,7 @@ export async function runBulgaria(
     `Asked: ${summary.asked.join(', ') || DASH}`,
     `Reminded: ${summary.reminded.join(', ') || DASH}`,
     `Waiting: ${summary.waiting.join(', ') || DASH}`,
+    ...(summary.ghosts.length ? [`Re-asked (earlier ask never delivered): ${idList(summary.ghosts)}`] : []),
     `Already done: ${summary.skippedDone.join(', ') || DASH}`,
     `Errors: ${summary.errors.join(' | ') || DASH}`,
   ];

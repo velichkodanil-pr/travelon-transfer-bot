@@ -44,10 +44,25 @@ export const config = {
   // later cron tick was skipped, and the service looked healthy while doing
   // nothing. If a cycle exceeds this, we log and EXIT so Railway restarts the
   // container with a clean browser.
-  // 45 min: a healthy full cycle runs ~20-30 min, so this only fires on a real hang.
-  cycleTimeoutMs: num(process.env.CYCLE_TIMEOUT_MIN, 45) * 60 * 1000,
+  // 90 min (was 45): by 11.2026 a full hourly cycle took 43-45 min and the 45-min
+  // watchdog killed it 11 times in 2.5 days, until Railway stopped restarting the
+  // bot. index.js skips a tick while a cycle still runs, so a long cycle can never
+  // overlap the next one — the watchdog only has to catch a real hang.
+  cycleTimeoutMs: num(process.env.CYCLE_TIMEOUT_MIN, 90) * 60 * 1000,
   tz: process.env.CRON_TZ || 'Europe/Kyiv',
   maxSendsPerRun: num(process.env.MAX_SENDS_PER_RUN, 25),
+  // Read a booking's chat and comment fields straight from the site's own
+  // endpoints (chat-detail JSON, raw edit-page HTML) instead of navigating to the
+  // page and opening the chat drawer: ~1 s per booking instead of ~15 s. When a
+  // fast read fails, the old browser path is used for that booking.
+  // FAST_READS=false restores the old behaviour everywhere.
+  fastReads: bool(process.env.FAST_READS, true),
+  // Until 11.2026 every chat "send" was a silent no-op (the Send button does not
+  // fire under automation), while the stores recorded the messages as sent. With
+  // GHOST_RECHECK=true a booking recorded as sent BY US whose chat does not hold
+  // the message is treated as not sent and processed again (the usual per-cycle
+  // send caps apply). Off by default: turning it on asks/warns every such booking.
+  ghostRecheck: bool(process.env.GHOST_RECHECK, false),
 
   // --- matching ---
   targetCountries: list(process.env.TARGET_COUNTRIES, [
@@ -160,6 +175,9 @@ export const config = {
     // BG_SERVER_DATE_FILTER=false restores the old full-history scan.
     serverDateFilter: bool(process.env.BG_SERVER_DATE_FILTER, true),
     serverDateMarginDays: num(process.env.BG_SERVER_DATE_MARGIN_DAYS, 3),
+    // Cap on asks + reminders actually posted per cycle (the rest wait for the
+    // next cycle), so a backlog can never flood the agents in one go.
+    maxSendsPerRun: num(process.env.BG_MAX_SENDS_PER_RUN, 25),
     department: process.env.BG_DEPARTMENT || 'Бронювання',
     subject: process.env.BG_SUBJECT || 'Надання контактів водію автобуса',
     askText:
@@ -256,12 +274,14 @@ export const config = {
 };
 
 // Phrases that mean "a transfer / driver phone request was already sent".
+// NB: JS \w does not match Cyrillic, so "контакт\w*" never matched "контакти" —
+// \S* is used instead (the same bug was fixed in the avia bot on 2026-06-19).
 export const ALREADY_SENT_PATTERNS = [
   /телефон\s+турист/i,
   /тел\.?\s+турист/i,
-  /контакт\w*\s+турист/i,
+  /контакт\S*\s+турист/i,
   /трансфермен/i,
-  /контакт\w*\s+воді/i,
+  /контакт\S*\s+воді/i,
   /надіслати\s+телефон/i,
   /телефон.*трансфер/i,
 ];
@@ -289,7 +309,16 @@ export const INSDOC_ASKED_PATTERNS = [
   /документ[\p{L}]*\s+(?:для|від)\s+громадян/iu,
 ];
 
-export const BG_ASK_PATTERNS = [/перевізник/i, /контакт.*турист.*перевізник/i];
+// The bot's own ask (mentions "перевізник") AND the managers' manual asks seen in
+// the chats ("Просимо надати контакти туристів для водія", "прохання надіслати
+// контакти туристів", "прошу прописати тел туристів для трансферу", "прохання
+// вказати тел туристки…") — a booking a manager already asked is not asked again.
+export const BG_ASK_PATTERNS = [
+  /перевізник/i,
+  /контакт.*турист.*перевізник/i,
+  /контакт\S*\s+турист\S*\s+для\s+вод/i,
+  /(?:надати|надіслати|вказати|прописати|скинути)\s+(?:\S+\s+){0,2}?(?:контакт|тел)\S*\s+турист/i,
+];
 export const BG_REMINDER_PATTERNS = [/нагадуємо.*контакт/i, /нагадуємо.*воді/i];
 
 // Bus-seating warning: fallback text (used only if the subject's auto-filled
