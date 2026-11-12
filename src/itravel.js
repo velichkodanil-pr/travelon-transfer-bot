@@ -70,12 +70,15 @@ export class ItravelClient {
       return;
     }
     // 2) Submit the WordPress login form (wp-login.php: log / pwd / wp-submit).
-    await this.page.goto(config.itravel.loginUrl, { waitUntil: 'domcontentloaded' });
+    const resp = await this.page.goto(config.itravel.loginUrl, { waitUntil: 'domcontentloaded' });
     await this.page.waitForTimeout(1000);
     const e = await this.firstExisting(sel.itravel.loginEmail);
     const p = await this.firstExisting(sel.itravel.loginPassword);
     if (!e || !p) {
-      throw new Error('[Itravel] Login form not found (check ITRAVEL_LOGIN_URL / sel.itravel.login*)');
+      // Since 03.11.2026 the hosting serves wp-login.php WITHOUT the form to the bot,
+      // while from Ukraine and from other clouds the form is there. Say exactly what
+      // came back (and from which egress IP), so it can be taken to the supplier.
+      throw new Error(`[Itravel] Login form not found — ${await this.describePage(resp)}`);
     }
     await e.fill(config.itravel.email);
     await p.fill(config.itravel.password);
@@ -91,6 +94,26 @@ export class ItravelClient {
       throw new Error('[Itravel] Login failed (profile marker not found after submit)');
     }
     log.info('[Itravel] Login OK.');
+  }
+
+  // One line about the page we got instead of the login form: HTTP status, final
+  // URL, title, the start of the visible text and our public IP (best-effort).
+  async describePage(resp) {
+    const status = resp ? resp.status() : '?';
+    const url = this.page.url();
+    const title = ((await this.page.title().catch(() => '')) || '').slice(0, 80);
+    const text = ((await this.page.locator('body').innerText().catch(() => '')) || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 200);
+    let ip = '?';
+    try {
+      const r = await fetch('https://api.ipify.org', { signal: AbortSignal.timeout(5000) });
+      if (r.ok) ip = (await r.text()).trim().slice(0, 45);
+    } catch {
+      /* diagnostics only */
+    }
+    return `status=${status} url=${url} title="${title}" text="${text}" egressIp=${ip}`;
   }
 
   // Open the "Повідомлення" modal for one order. Throws with a precise reason.
