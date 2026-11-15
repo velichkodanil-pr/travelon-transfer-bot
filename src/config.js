@@ -35,6 +35,10 @@ export const config = {
   // or a crash-restart can no longer start an extra cycle in the middle of the
   // hour (the manager-bot pattern). RUN_ON_STARTUP=true restores the old behaviour.
   runOnStartup: bool(process.env.RUN_ON_STARTUP, false),
+  // Railway Cron (UTC) + RUN_ONCE: run the cycle only when the current hour in
+  // CRON_TZ is one of CHECK_CRON's hours, so the Railway schedule can list the UTC
+  // hours of both the winter and the summer offset. See src/cronGate.js.
+  cronHourGate: bool(process.env.CRON_HOUR_GATE, false),
   // Graceful stop: on SIGTERM the booking in progress is finished, the rest waits
   // for the next cycle; after this many seconds we exit regardless. Keep it below
   // the Railway draining time (RAILWAY_DEPLOYMENT_DRAINING_SECONDS / service setting).

@@ -145,6 +145,8 @@ git push -u origin main
 | `DRY_RUN` | `true` | `true` = лише лог; `false` = надсилати |
 | `CHECK_CRON` | `*/30 * * * *` | Розклад перевірок |
 | `CRON_TZ` | `Europe/Kyiv` | Часовий пояс для розкладу і «сьогодні» |
+| `RUN_ONCE` | `false` | `true` = один цикл і вихід (прод: Railway Cron) |
+| `CRON_HOUR_GATE` | `false` | З `RUN_ONCE`: запуск лише в години `CHECK_CRON` за `CRON_TZ` (див. «Railway Cron») |
 | `TARGET_COUNTRIES` | 5 країн | Які країни обробляти |
 | `GENERIC_TRANSFER_ONLY_COUNTRIES` | `*` | Де питати лише заявки з модулем Transfer (`*` — усюди, порожньо — ніде) |
 | `TARGET_STATUSES` | `Confirmed,Confirmed Print` | Які статуси |
@@ -154,6 +156,19 @@ git push -u origin main
 | `HEADLESS` | `true` | `false` — бачити браузер (локально) |
 
 ---
+
+### Railway Cron (з 15.11.2026)
+
+Бот не працює 24/7: Railway запускає контейнер за розкладом, бот робить один
+цикл і виходить (`RUN_ONCE=true`) — пам'ять оплачується лише під час циклу.
+
+- Розклад Railway (UTC): `0 4-21 * * *`; `CHECK_CRON=0 7-23 * * *` (Київ).
+- Railway рахує розклад у UTC, а Київ узимку UTC+2, улітку UTC+3. Тому розклад
+  Railway охоплює години обох зсувів, а `CRON_HOUR_GATE=true` пропускає запуск
+  лише в години `CHECK_CRON` за `CRON_TZ` (зайвий запуск виходить за секунди).
+  При переведенні годинника нічого міняти не треба.
+- Змінити години: правиш `CHECK_CRON` і розклад Railway (UTC-години для +2 і +3).
+- Повернути 24/7: прибрати Cron Schedule у Railway і `RUN_ONCE` / `CRON_HOUR_GATE`.
 
 ## Болгарія + Eline
 

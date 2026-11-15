@@ -5,6 +5,7 @@ import { config, validateConfig } from './config.js';
 import { log } from './logger.js';
 import { runCycle } from './runCycle.js';
 import { requestStop } from './stop.js';
+import { cronHourMatches, hourInTz } from './cronGate.js';
 
 let running = false;
 let startedAt = 0;
@@ -87,6 +88,12 @@ async function main() {
   log.info('============================================================');
 
   if (config.runOnce) {
+    if (config.cronHourGate && !cronHourMatches(config.checkCron, new Date(), config.tz)) {
+      log.info(
+        `CRON_HOUR_GATE: ${hourInTz(new Date(), config.tz)}:xx ${config.tz} is not an hour of "${config.checkCron}" — no cycle, exiting.`
+      );
+      process.exit(0);
+    }
     await safeRun('startup');
     log.info('RUN_ONCE=true — exiting after a single cycle.');
     process.exit(0);
