@@ -23,6 +23,8 @@ export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps
     wouldSend: [], // dry-run candidates
     skippedAlready: [], // chat already had a transfer request
     skippedStore: [], // we already messaged it on a previous run
+    skippedNoTransfer: [], // no Transfer module -> the phone is not needed
+    transferUnknown: [], // transfer module not readable from the list -> not asked
     errors: [],
   };
   let bg = null;
@@ -46,11 +48,28 @@ export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps
     });
     summary.matched = bookings.map((b) => `${b.id}/${b.country}`);
 
+    // The phone is for the transfer driver, so a booking WITHOUT a Transfer module
+    // is not asked (config.generic.transferOnlyCountries: '*' = every country).
+    // It is not recorded either — once a transfer is added it is asked as usual.
+    const transferOnly = (config.generic.transferOnlyCountries || []).map((c) => c.toLowerCase());
+    const needsTransfer = (b) =>
+      transferOnly.includes('*') || transferOnly.includes(String(b.country || '').toLowerCase());
+
     let sends = 0;
     for (const [idx, b] of bookings.entries()) {
       if (stopRequested()) {
         log.warn(`Stop requested — ${bookings.length - idx} booking(s) left for the next cycle.`);
         break;
+      }
+      if (needsTransfer(b) && b.transfer !== true) {
+        if (b.transfer === false) {
+          summary.skippedNoTransfer.push(b.id);
+          log.info(`Skip ${b.id} (${b.country}): no Transfer module — the phone is not needed.`);
+        } else {
+          summary.transferUnknown.push(b.id);
+          log.warn(`Skip ${b.id} (${b.country}): cannot tell from the list whether it has a transfer.`);
+        }
+        continue;
       }
       try {
         const prev = await getSent(b.id);
@@ -174,6 +193,12 @@ export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps
       }
     }
 
+    if (summary.transferUnknown.length) {
+      summary.errors.push(
+        `transfer module not readable from the list (page layout changed?) — NOT asked: ${summary.transferUnknown.join(', ')}`
+      );
+    }
+
     // Bulgaria + Eline workflow — reuses the same logged-in TravelON session.
     if (config.bulgaria.enabled && !stopRequested()) {
       bg = await runBulgaria(client, bgDeps);
@@ -205,6 +230,7 @@ export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps
       : `Sent: ${summary.sent.join(', ') || '—'}`,
     `Skipped (already in chat): ${summary.skippedAlready.join(', ') || '—'}`,
     `Skipped (sent before): ${summary.skippedStore.join(', ') || '—'}`,
+    `Skipped (no transfer module): ${summary.skippedNoTransfer.join(', ') || '—'}`,
     `Errors: ${summary.errors.join(' | ') || '—'}`,
   ];
   const interrupted = stopRequested() ? stopReason() : '';
@@ -226,7 +252,10 @@ export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps
       // Generic-flow rows (Greece/Albania/Croatia/Spain): id, country, creation
       // date + the outcome derived from the summary buckets. These countries
       // only get an agent request — phone reading/writing is Bulgaria-only.
-      const genericRows = bookings.map((b) => {
+      // A booking skipped for having no transfer is not a contact request: it
+      // gets no row (an older row of the same booking stays as it was).
+      const notAsked = new Set([...summary.skippedNoTransfer, ...summary.transferUnknown]);
+      const genericRows = bookings.filter((b) => !notAsked.has(b.id)).map((b) => {
         let asked = '';
         let status = 'Оброблено';
         if (summary.sent.includes(b.id)) {

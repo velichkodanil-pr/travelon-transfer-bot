@@ -29,7 +29,7 @@ function fakeClient({ bookings, panel = {}, body = {}, onOpenChat, closedDrawer 
     async login() {},
     async openRequests() {},
     async listUpcomingMatching() {
-      return bookings.map((id) => ({ id, country: 'Греція', status: '', dateISO: '2026-10-01' }));
+      return bookings.map((id) => ({ id, country: 'Греція', status: '', dateISO: '2026-10-01', transfer: true }));
     },
     async openChat(id) {
       chatId = id;

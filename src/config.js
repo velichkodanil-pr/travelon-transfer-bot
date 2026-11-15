@@ -89,6 +89,19 @@ export const config = {
     // Do NOT touch the pre-existing backlog: only bookings CREATED on/after this
     // date are eligible. Everything older stays for the managers to close by hand.
     createdFromISO: process.env.GENERIC_CREATED_FROM || '2026-08-30',
+    // Iryna Honcharova, 15.11.2026: the bot asked for the tourists' phone in
+    // Spanish bookings that hold accommodation only (74655: Hotel + Insurance).
+    // The phone is needed for the TRANSFER, so a booking is asked only when it has
+    // a Transfer module (the "Transfer:" line of the list's Providers column).
+    // Nothing is recorded for a booking without one, so it is asked on the first
+    // cycle after a transfer is added.
+    //   GENERIC_TRANSFER_ONLY_COUNTRIES  unset or *  -> every country of this flow
+    //   GENERIC_TRANSFER_ONLY_COUNTRIES=Іспанія      -> only the listed countries
+    //   GENERIC_TRANSFER_ONLY_COUNTRIES=             -> off: ask every booking again
+    transferOnlyCountries:
+      process.env.GENERIC_TRANSFER_ONLY_COUNTRIES === undefined
+        ? ['*']
+        : list(process.env.GENERIC_TRANSFER_ONLY_COUNTRIES, []),
   },
 
   // Insurance + RU/BY-citizen document request. For bookings that HAVE insurance

@@ -38,6 +38,19 @@ function ddmmyyyyToISO(d) {
   return `${m[3]}-${m[2]}-${m[1]}`;
 }
 
+// Does a scanned list row have a Transfer module?  true / false / null (cannot tell).
+// The Providers column renders one line per module — <div class="provider_info_line
+// transfer">Transfer: Itravel</div> — and leaves the line EMPTY when the booking has
+// no such module (74655, Hotel + Insurance: the transfer line is "").
+// scanRows() returns that line as `transfer`; null means the page no longer renders
+// these lines at all. Then the "Transfer:" label in the row text still says yes;
+// without either we do not guess.
+export function rowHasTransfer(row) {
+  if (typeof row?.transfer === 'string') return row.transfer.trim() !== '';
+  if (/(?:^|[\s(])(?:transfer|трансфер)\s*:/i.test(row?.text || '')) return true;
+  return null;
+}
+
 export class TravelonClient {
   constructor() {
     this.browser = null;
@@ -322,6 +335,7 @@ export class TravelonClient {
           status: r.status,
           dateISO: createdISO || '',
           dateRaw: r.bookingDate || '',
+          transfer: rowHasTransfer(r), // true / false / null = cannot tell
         });
       }
     }
@@ -869,7 +883,18 @@ export class TravelonClient {
           );
           const dpm = depCell ? norm(depCell.innerText).match(/\d{2}\.\d{2}\.\d{4}/) : null;
           const departure = dpm ? dpm[0] : '';
-          return { text, status, checkin, bookingDate, departure };
+          // Providers column: one line per module ("Transfer: Itravel"), rendered
+          // EMPTY when the booking has no such module. A row without the line (a
+          // child booking shows just "-") has no transfer either — as long as the
+          // page still renders these lines at all; if it does not, the markup has
+          // changed and we cannot tell (null).
+          const tLine = tr.querySelector('.provider_info_line.transfer');
+          const transfer = tLine
+            ? norm(tLine.textContent)
+            : document.querySelector('.provider_info_line')
+              ? ''
+              : null;
+          return { text, status, checkin, bookingDate, departure, transfer };
         })
       )
       .catch(() => []);

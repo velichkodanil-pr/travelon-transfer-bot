@@ -205,7 +205,7 @@ function genericClient({ bookings, feed = {} }) {
     async login() {},
     async openRequests() {},
     async listUpcomingMatching() {
-      return bookings.map((id) => ({ id, country: 'Греція', status: '', dateISO: '2026-11-01' }));
+      return bookings.map((id) => ({ id, country: 'Греція', status: '', dateISO: '2026-11-01', transfer: true }));
     },
     async readChatTextFast(id) { return feed[id] === undefined ? '' : feed[id]; },
     async openChat(id) { chatId = id; calls.openChat.push(id); },
