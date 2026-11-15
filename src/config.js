@@ -299,7 +299,10 @@ export const config = {
 // NB: JS \w does not match Cyrillic, so "контакт\w*" never matched "контакти" —
 // \S* is used instead (the same bug was fixed in the avia bot on 2026-06-19).
 export const ALREADY_SENT_PATTERNS = [
-  /телефон\s+турист/i,
+  // \S*: the bus-carrier ask (bulgaria.askText) says "номер телефону туристів" —
+  // with \s+ right after "телефон" the generic flow did not see it and could ask
+  // the same booking a second time once it turned Confirmed.
+  /телефон\S*\s+турист/i,
   /тел\.?\s+турист/i,
   /контакт\S*\s+турист/i,
   /трансфермен/i,

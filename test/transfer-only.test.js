@@ -165,3 +165,17 @@ test('GENERIC_TRANSFER_ONLY_COUNTRIES: a list limits the rule, empty switches it
   assert.deepEqual(s2.sent, ['77031']);
   assert.deepEqual(s2.skippedNoTransfer, []);
 });
+
+test('the bus-carrier ask counts as asked: no second request from the generic flow', async () => {
+  const { ALREADY_SENT_PATTERNS } = await import('../src/config.js');
+  assert.ok(ALREADY_SENT_PATTERNS.some((re) => re.test(config.bulgaria.askText)), config.bulgaria.askText);
+  const c = client([{ id: '77041', country: 'Греція', transfer: true }]);
+  c.readChatTextFast = async (id) => {
+    c.calls.feed.push(id);
+    return `Повідомлення по заявці ${id}\n${config.bulgaria.askText}`;
+  };
+  const s = await runCycle({ makeClient: () => c });
+  assert.deepEqual(s.sent, []);
+  assert.deepEqual(s.skippedAlready, ['77041']);
+  assert.deepEqual(c.calls.openChat, []);
+});
