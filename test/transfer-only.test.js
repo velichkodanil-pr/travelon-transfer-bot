@@ -21,6 +21,9 @@ before(async () => {
   process.env.BUSWARN_ENABLED = 'false';
   process.env.INSDOC_ENABLED = 'false';
   delete process.env.GENERIC_TRANSFER_ONLY_COUNTRIES;
+  // These tests are about the transfer-module rule, written on Spain/Albania rows.
+  // Since 17.11.2026 the default country list is Греція + Хорватія only.
+  process.env.TARGET_COUNTRIES = 'Греція,Албанія,Хорватія,Іспанія';
   ({ runCycle } = await import('../src/runCycle.js'));
   store = await import('../src/store.js');
   ({ config } = await import('../src/config.js'));

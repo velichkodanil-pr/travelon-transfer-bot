@@ -1,6 +1,7 @@
 // One full pass: login -> filter -> per-booking dedup check -> send/log.
 import { TravelonClient } from './travelon.js';
 import { config, ALREADY_SENT_PATTERNS } from './config.js';
+import { agentPhoneKeys, classifyTouristPhones } from './phone.js';
 import { log } from './logger.js';
 import { getSent, markSent } from './store.js';
 import { stopRequested, stopReason } from './stop.js';
@@ -25,6 +26,8 @@ export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps
     skippedStore: [], // we already messaged it on a previous run
     skippedNoTransfer: [], // no Transfer module -> the phone is not needed
     transferUnknown: [], // transfer module not readable from the list -> not asked
+    skippedBus: [], // bus carrier (Itravel / E.Line / RIKI) -> the bus flow handles it
+    skippedTouristPhone: [], // «Телефон туриста» already holds the tourist's number
     errors: [],
   };
   let bg = null;
@@ -71,6 +74,15 @@ export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps
         }
         continue;
       }
+      // Bus bookings (Itravel / E.Line Tour / RIKI) belong to the bus flow, which
+      // reads «Телефон туриста» and talks to the agent itself. Asking them here as
+      // well sent «надіслати телефон туристів для зв'язку з трансферменами» into
+      // 74742 (Греція + Itravel) whose tourist number was in the booking.
+      if (config.bulgaria.enabled && b.busCarrier) {
+        summary.skippedBus.push(b.id);
+        log.info(`Skip ${b.id} (${b.country}): bus carrier ${b.busCarrier} — handled by the bus flow.`);
+        continue;
+      }
       try {
         const prev = await getSent(b.id);
         // Read the chat feed once (~0.3 s, no navigation); null = unreadable.
@@ -97,6 +109,21 @@ export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps
             continue;
           }
           log.info(`${b.id}: recorded as sent, but the request is not in the chat — sending again.`);
+        }
+
+        // «Телефон туриста» (mandatory in the basket of bus tours, Spain, Albania
+        // since 17.11.2026) already holds the tourist's own number -> nothing to ask.
+        // Not recorded: the field is re-read next cycle (~1 s, page HTML only).
+        if (client.readEditFieldsFast) {
+          const e = await client.readEditFieldsFast(b.id);
+          if (e) {
+            const f = classifyTouristPhones(e.tourists || [], agentPhoneKeys([e.telephone, e.card]));
+            if (f.own.length || f.foreign.length) {
+              summary.skippedTouristPhone.push(b.id);
+              log.info(`Skip ${b.id} (${b.country}): the tourist's phone is in «Телефон туриста».`);
+              continue;
+            }
+          }
         }
 
         // Fast path: decide from the chat feed, open the drawer only to send.
@@ -231,6 +258,8 @@ export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps
     `Skipped (already in chat): ${summary.skippedAlready.join(', ') || '—'}`,
     `Skipped (sent before): ${summary.skippedStore.join(', ') || '—'}`,
     `Skipped (no transfer module): ${summary.skippedNoTransfer.join(', ') || '—'}`,
+    `Skipped (bus carrier → bus flow): ${summary.skippedBus.join(', ') || '—'}`,
+    `Skipped (tourist phone in the booking): ${summary.skippedTouristPhone.join(', ') || '—'}`,
     `Errors: ${summary.errors.join(' | ') || '—'}`,
   ];
   const interrupted = stopRequested() ? stopReason() : '';
@@ -254,7 +283,8 @@ export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps
       // only get an agent request — phone reading/writing is Bulgaria-only.
       // A booking skipped for having no transfer is not a contact request: it
       // gets no row (an older row of the same booking stays as it was).
-      const notAsked = new Set([...summary.skippedNoTransfer, ...summary.transferUnknown]);
+      // Bus-carrier bookings get their row from the bus flow (bg.rows).
+      const notAsked = new Set([...summary.skippedNoTransfer, ...summary.transferUnknown, ...summary.skippedBus]);
       const genericRows = bookings.filter((b) => !notAsked.has(b.id)).map((b) => {
         let asked = '';
         let status = 'Оброблено';
@@ -270,6 +300,9 @@ export async function runCycle({ makeClient = () => new TravelonClient(), bgDeps
         } else if (summary.skippedStore.includes(b.id)) {
           asked = 'так';
           status = 'Запит надіслано раніше';
+        } else if (summary.skippedTouristPhone.includes(b.id)) {
+          asked = 'ні';
+          status = 'Телефон туриста вже в заявці';
         }
         return {
           bookingId: b.id,

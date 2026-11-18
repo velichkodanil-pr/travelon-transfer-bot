@@ -45,6 +45,19 @@ function ddmmyyyyToISO(d) {
 // scanRows() returns that line as `transfer`; null means the page no longer renders
 // these lines at all. Then the "Transfer:" label in the row text still says yes;
 // without either we do not guess.
+// Which bus carrier of the bus flow (Itravel / E.Line Tour / RIKI) a list row
+// mentions — '' when none. Such bookings belong to the bus flow (bulgaria.js),
+// which reads «Телефон туриста»; the transfer flow must not ask them a second time
+// (74742, Греція + Itravel, 18.11.2026: the tourist's number was in the booking).
+export function rowBusCarrier(row) {
+  const text = row?.text || '';
+  for (const s of config.bulgaria.suppliers || []) {
+    const esc = String(s.name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (esc && new RegExp(`(?:^|[^\\p{L}])${esc}(?![\\p{L}])`, 'iu').test(text)) return s.name;
+  }
+  return '';
+}
+
 export function rowHasTransfer(row) {
   if (typeof row?.transfer === 'string') return row.transfer.trim() !== '';
   if (/(?:^|[\s(])(?:transfer|трансфер)\s*:/i.test(row?.text || '')) return true;
@@ -336,6 +349,7 @@ export class TravelonClient {
           dateISO: createdISO || '',
           dateRaw: r.bookingDate || '',
           transfer: rowHasTransfer(r), // true / false / null = cannot tell
+          busCarrier: rowBusCarrier(r), // '' or 'Itravel' / 'E.Line Tour' / 'RIKI - A (Bus)'
         });
       }
     }
@@ -484,7 +498,22 @@ export class TravelonClient {
             const admin = doc.querySelector(ca);
             if (!user || !admin) return { error: 'comment fields not in the page HTML' };
             const tel = doc.querySelector('input[name="bundle[telephone]"]');
-            return { user: user.value || '', admin: admin.value || '', telephone: tel ? tel.value || '' : '' };
+            // «Телефон туриста» of every passenger (one input per passenger row).
+            const tourists = [...doc.querySelectorAll('input[name="passenger[][telephone]"]')].map(
+              (e) => e.value || ''
+            );
+            // The agent's user card in the booking header: name, company, branch,
+            // then the phone(s) printed right after the hidden #bundle_user_id.
+            const u = doc.getElementById('bundle_user_id');
+            let card = '';
+            for (let n = u ? u.nextSibling : null; n; n = n.nextSibling) card += ` ${n.textContent || ''}`;
+            return {
+              user: user.value || '',
+              admin: admin.value || '',
+              telephone: tel ? tel.value || '' : '',
+              tourists,
+              card: card.replace(/\s+/g, ' ').trim(),
+            };
           } catch (e) {
             return { error: String(e) };
           }
@@ -716,6 +745,27 @@ export class TravelonClient {
     const loc = this.page.locator('input[name="bundle[telephone]"]').first();
     if ((await loc.count().catch(() => 0)) === 0) return '';
     return (await loc.inputValue().catch(() => '')) || '';
+  }
+
+  // «Телефон туриста» of every passenger, from the opened edit page (slow path).
+  async readTouristPhones() {
+    const loc = this.page.locator('input[name="passenger[][telephone]"]');
+    const n = await loc.count().catch(() => 0);
+    const out = [];
+    for (let i = 0; i < n; i++) out.push((await loc.nth(i).inputValue().catch(() => '')) || '');
+    return out;
+  }
+
+  // Phone(s) on the agent's user card in the booking header (slow path).
+  async readAgentCardText() {
+    return this.page
+      .evaluate(() => {
+        const u = document.getElementById('bundle_user_id');
+        let card = '';
+        for (let n = u ? u.nextSibling : null; n; n = n.nextSibling) card += ` ${n.textContent || ''}`;
+        return card.replace(/\s+/g, ' ').trim();
+      })
+      .catch(() => '');
   }
 
   // Read every passenger's Nationality (select[name="passenger[][nationality]"]).

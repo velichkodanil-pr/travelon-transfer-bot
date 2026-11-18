@@ -11,6 +11,8 @@ let config;
 before(async () => {
   process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'transfer-bg-'));
   process.env.DRY_RUN = 'false';
+  // These tests cover the agent ask + reminder, off by default since 17.11.2026.
+  process.env.BG_ASK_ENABLED = 'true';
   process.env.REPORT_ENABLED = 'false';
   process.env.ELINE_EMAIL = 'test@example.com';
   process.env.ELINE_PASSWORD = 'x';

@@ -149,3 +149,62 @@ export function phonesMissingFromText(phones, text) {
 export function buildPhoneMessage(template, phones) {
   return String(template).replace('{phones}', (phones || []).join(', '));
 }
+
+// --- «Телефон туриста» field (passenger[][telephone], since 17.11.2026) --------
+
+// Comparison key of a phone-shaped value: its last 9 digits (the UA subscriber
+// part), so "+380679525859", "380679525859", "0(67)952-58-59" and "067 952 58 59"
+// are the same number. Foreign numbers compare the same way. null if < 9 digits.
+export function phoneKey(raw) {
+  const d = String(raw || '').replace(/\D+/g, '');
+  return d.length >= 9 ? d.slice(-9) : null;
+}
+
+// Every number the AGENT is known by: the booking's Telephone field and the phone(s)
+// printed on the agent's user card in the booking header ("+380687892498: +380669196923").
+export function agentPhoneKeys(sources) {
+  const keys = new Set();
+  for (const src of sources || []) {
+    for (const m of String(src || '').match(PHONE_CANDIDATE_RE) || []) {
+      const km = phoneKey(m);
+      if (km) keys.add(km);
+    }
+  }
+  return keys;
+}
+
+// Classify the passengers' «Телефон туриста» values against the agent's numbers.
+//   own      — tourist numbers in canonical UA form (+380…), ready for the supplier;
+//   foreign  — tourist numbers that are not UA numbers (kept raw: we never guess);
+//   agentOnly— the field is filled, but every number in it is the agent's own;
+//   empty    — no number in the field at all (bookings made before the field).
+export function classifyTouristPhones(values, agentKeys = new Set()) {
+  const own = [];
+  const foreign = [];
+  const seen = new Set();
+  let agentHits = 0;
+  for (const v of values || []) {
+    const raw = String(v || '').trim();
+    if (!raw) continue;
+    const tokens = raw.match(PHONE_CANDIDATE_RE) || [];
+    for (const t of tokens.length ? tokens : [raw]) {
+      const key = phoneKey(t);
+      if (!key) continue;
+      if (agentKeys.has(key)) {
+        agentHits += 1;
+        continue;
+      }
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const canon = normalizeUaPhone(t);
+      if (canon && isUsablePhone(canon)) own.push(canon);
+      else foreign.push(t.trim());
+    }
+  }
+  return {
+    own,
+    foreign,
+    agentOnly: agentHits > 0 && own.length === 0 && foreign.length === 0,
+    empty: agentHits === 0 && own.length === 0 && foreign.length === 0,
+  };
+}

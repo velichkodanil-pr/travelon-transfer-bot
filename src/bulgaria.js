@@ -1,17 +1,28 @@
-// Bulgaria + Eline + Itravel workflow.
-// For Confirmed/Confirmed Print Bulgaria bookings (check-in tomorrow+) of the
-// configured transfer suppliers:
-// 1. read the tourist phone from the two comment fields;
+// Bulgaria + Eline + Itravel workflow (bus carriers Itravel / E.Line Tour / RIKI,
+// any country).
+// For bookings of the configured bus suppliers (check-in tomorrow+):
+// 0. read «Телефон туриста» of the passengers (mandatory in the basket since
+//    17.11.2026). A number of the tourist -> hand it to the supplier (step 3).
+//    Only the AGENT's own number there (user card / booking Telephone) -> ONE
+//    message «вкажіть вірний телефон туристів» into the booking chat;
+// 1. else read the tourist phone from the two comment fields;
 // 2. else from the booking chat (agent reply);
 // 3. if found -> write it into BOTH comment fields (when taken from chat);
 //    for E.Line -> also into the Eline portal; for Itravel -> also send it into
 //    the Itravel client-cabinet booking thread (one message, deduped);
-// 4. if nowhere -> ask the agent; next day at 12:00 (Kyiv) send ONE reminder;
-//    keep re-checking until the phone arrives, then act and stop.
+// 4. if nowhere -> since 17.11.2026 the agent is NOT asked (the basket field is
+//    mandatory now). BG_ASK_ENABLED=true restores the old ask + one reminder the
+//    next day at 12:00 (Kyiv).
 // DRY_RUN: detects + logs intended actions, writes/sends nothing.
-import { config, BG_ASK_PATTERNS, BG_REMINDER_PATTERNS } from './config.js';
+import { config, BG_ASK_PATTERNS, BG_REMINDER_PATTERNS, BG_WRONG_PHONE_PATTERNS } from './config.js';
 import { log } from './logger.js';
-import { extractPhones, normalizeUaPhone, isUsablePhone } from './phone.js';
+import {
+  extractPhones,
+  isUsablePhone,
+  phoneKey,
+  agentPhoneKeys,
+  classifyTouristPhones,
+} from './phone.js';
 import { ElineClient } from './eline.js';
 import { ItravelClient } from './itravel.js';
 import { getWatch, setWatch } from './store.js';
@@ -151,7 +162,7 @@ function parseBulgariaRow(row, supplier, checkinFrom) {
 // Returns TRUE only when the phone is provably in the Eline portal (already
 // present, or written AND verified by re-reading the saved form). Callers must
 // not mark a booking done on a false result — it will be retried next cycle.
-async function writeToEline(booking, phones, summary, ensureEline, agentPhone) {
+async function writeToEline(booking, phones, summary, ensureEline, isAgent) {
   if (!config.eline.email || !config.eline.password) {
     summary.errors.push(`${booking.id}: ELINE creds missing, portal step skipped`);
     log.warn(`[BG] ${booking.id}: Eline creds not set; cannot write portal #${booking.elineNum}.`);
@@ -162,7 +173,7 @@ async function writeToEline(booking, phones, summary, ensureEline, agentPhone) {
   // Already filled in the portal? Leave it — never overwrite an existing number.
   const existing = (await eline.readPassengerPhones())
     .filter(looksLikePhone)
-    .filter((p) => normalizeUaPhone(p) !== agentPhone);
+    .filter((p) => !isAgent(p));
   if (existing.length) {
     log.info(
       `[BG] ${booking.id} Eline#${booking.elineNum}: phone already in portal [${existing.join(
@@ -220,6 +231,10 @@ export async function runBulgaria(
     itravelSkipped: [], // Itravel cabinet down this cycle -> booking left for the next one
     itravelDown: null, // why the cabinet was skipped (login failure message)
     skippedDone: [],
+    wrongPhone: [], // «Телефон туриста» = the agent's own number -> asked to fix it
+    wrongPhoneWaiting: [], // already asked to fix it, still the agent's number
+    foreignPhone: [], // a non-UA tourist number: not sent to the supplier automatically
+    noPhone: [], // no number anywhere; the agent is not asked any more (17.11.2026)
     ghosts: [], // stored as asked, but the ask is not in the chat (GHOST_RECHECK)
     errors: [],
     interrupted: false,
@@ -374,10 +389,10 @@ export async function runBulgaria(
   };
   // Eline write for a booking whose phone we have. Never throws: a failed or
   // timed-out portal step just leaves the booking open for the next cycle.
-  const elineWrite = async (c, phones, agentPhone) => {
+  const elineWrite = async (c, phones, isAgent) => {
     try {
       return await withElineDeadline(c.id, 'write', () =>
-        writeToEline(c, phones, summary, ensureEline, agentPhone)
+        writeToEline(c, phones, summary, ensureEline, isAgent)
       );
     } catch (err) {
       summary.errors.push(`${c.id}: Eline: ${err.message}`);
@@ -468,7 +483,60 @@ export async function runBulgaria(
     return res.sent; // dry-run -> not yet messaged
   };
 
-  let sends = 0; // asks + reminders actually posted this cycle
+  // Hand the tourist phone(s) to the supplier (Eline portal / Itravel cabinet),
+  // remember the result and add the report row. Shared by every phone source.
+  const deliver = async (c, w, phones, isAgent, { source, label, writtenInBooking }) => {
+    const elineOk = c.writeToEline ? await elineWrite(c, phones, isAgent) : true;
+    let itravelMsgAt = null;
+    if (c.messageItravel) {
+      try {
+        if (await messageItravelFor(c, phones, w)) itravelMsgAt = new Date().toISOString();
+      } catch (err) {
+        summary.errors.push(`${c.id}: Itravel message failed: ${err.message}`);
+        log.error(`[Itravel] ${c.id} message failed:`, err.message);
+      }
+    }
+    // Only close the booking once the SUPPLIER provably has the phone.
+    const supplierOk = config.dryRun || (elineOk && (!c.messageItravel || Boolean(itravelMsgAt)));
+    await persist(c.id, {
+      ...(supplierOk ? { doneAt: new Date().toISOString() } : {}),
+      phones,
+      source,
+      ...(itravelMsgAt ? { itravelMsgAt } : {}),
+    });
+    summary.rows.push(
+      mkRow(c, {
+        phonePresent: 'так',
+        agentNumber: phones.join(' '),
+        writtenInBooking,
+        writtenInEline: c.writeToEline
+          ? config.dryRun
+            ? 'ні (вписав би)'
+            : elineOk
+              ? 'так'
+              : 'НІ — не підтверджено'
+          : 'не потрібно',
+        status: supplierOk
+          ? 'Зроблено'
+          : waitingRef.has(c.id) && elineOk
+            ? WAIT_REF_STATUS
+            : 'Помилка — постачальник не отримав',
+        note: [
+          dryTag,
+          label,
+          supplierOk
+            ? ''
+            : waitingRef.has(c.id) && elineOk
+              ? WAIT_REF_NOTE
+              : 'запис постачальнику не підтверджено — повтор наступного циклу',
+        ]
+          .filter(Boolean)
+          .join(' · '),
+      })
+    );
+  };
+
+  let sends = 0; // asks, reminders and «wrong phone» messages actually posted this cycle
   let capWarned = false;
   try {
     for (const [idx, c] of candidates.entries()) {
@@ -538,74 +606,131 @@ export async function runBulgaria(
           continue;
         }
 
-        // (a) phone already in the comment fields? Read them from the page HTML
-        // (~1 s) and open the page only when that fails (~8 s).
+        // Read the edit page from its HTML (~1 s); open the page only when that
+        // fails (~8 s): comments, the booking Telephone, «Телефон туриста» of each
+        // passenger and the phone(s) on the agent's user card.
         const fastEdit = travelon.readEditFieldsFast ? await travelon.readEditFieldsFast(c.id) : null;
         let comments;
         let agentRaw;
+        let touristRaw;
+        let cardRaw;
         if (fastEdit) {
           comments = { user: fastEdit.user, admin: fastEdit.admin };
           agentRaw = fastEdit.telephone;
+          touristRaw = fastEdit.tourists || [];
+          cardRaw = fastEdit.card || '';
         } else {
           await travelon.openEdit(c.id);
           comments = await travelon.readComments();
           agentRaw = await travelon.readAgentPhone();
+          touristRaw = travelon.readTouristPhones ? await travelon.readTouristPhones() : [];
+          cardRaw = travelon.readAgentCardText ? await travelon.readAgentCardText() : '';
         }
-        // The booking Telephone field is the AGENT's number — never the tourist's.
-        const agentPhone = normalizeUaPhone(agentRaw);
-        let phones = extractPhones(`${comments.user} ${comments.admin}`).filter(
-          (p) => p !== agentPhone
-        );
-        if (phones.length) {
-          const elineOk = c.writeToEline ? await elineWrite(c, phones, agentPhone) : true;
-          let itravelMsgAt = null;
-          if (c.messageItravel) {
-            try {
-              if (await messageItravelFor(c, phones, w)) itravelMsgAt = new Date().toISOString();
-            } catch (err) {
-              summary.errors.push(`${c.id}: Itravel message failed: ${err.message}`);
-              log.error(`[Itravel] ${c.id} message failed:`, err.message);
-            }
-          }
-          // Only close the booking once the SUPPLIER provably has the phone.
-          const supplierOk =
-            config.dryRun || (elineOk && (!c.messageItravel || Boolean(itravelMsgAt)));
-          await persist(c.id, {
-            ...(supplierOk ? { doneAt: new Date().toISOString() } : {}),
-            phones,
-            source: 'comments',
-            ...(itravelMsgAt ? { itravelMsgAt } : {}),
+        // The booking Telephone field and the user card hold the AGENT's numbers —
+        // never the tourist's.
+        const agentKeys = agentPhoneKeys([agentRaw, cardRaw]);
+        const isAgent = (p) => agentKeys.has(phoneKey(p));
+        const field = classifyTouristPhones(touristRaw, agentKeys);
+
+        // (0) «Телефон туриста» filled with the tourist's number -> the supplier gets it.
+        if (field.own.length) {
+          await deliver(c, w, field.own, isAgent, {
+            source: 'tourist-field',
+            label: `телефон у полі «Телефон туриста» (${c.supplier})`,
+            writtenInBooking: 'так',
           });
+          continue;
+        }
+        // (0a) a foreign number: never guessed into the UA-only supplier fields.
+        if (field.foreign.length) {
+          summary.foreignPhone.push(c.id);
           summary.rows.push(
             mkRow(c, {
-              phonePresent: 'так',
-              agentNumber: phones.join(' '),
+              phonePresent: 'так (не UA)',
+              agentNumber: field.foreign.join(' '),
               writtenInBooking: 'так',
-              writtenInEline: c.writeToEline
-                ? config.dryRun
-                  ? 'ні (вписав би)'
-                  : elineOk
-                    ? 'так'
-                    : 'НІ — не підтверджено'
-                : 'не потрібно',
-              status: supplierOk
-                ? 'Зроблено'
-                : waitingRef.has(c.id) && elineOk
-                  ? WAIT_REF_STATUS
-                  : 'Помилка — постачальник не отримав',
-              note: [
-                dryTag,
-                `телефон уже в коментарях заявки (${c.supplier})`,
-                supplierOk
-                  ? ''
-                  : waitingRef.has(c.id) && elineOk
-                    ? WAIT_REF_NOTE
-                    : 'запис постачальнику не підтверджено — повтор наступного циклу',
-              ]
-                .filter(Boolean)
-                .join(' · '),
+              status: 'Телефон туриста не український — передати постачальнику вручну',
+              note: dryTag,
             })
           );
+          continue;
+        }
+        // (0b) only the agent's own number in «Телефон туриста» -> one message
+        // asking for the tourists' real number. Nothing goes to the supplier.
+        if (field.agentOnly && config.bulgaria.wrongPhoneEnabled) {
+          const feed = travelon.readChatTextFast ? await travelon.readChatTextFast(c.id) : null;
+          const inChat = feed !== null && BG_WRONG_PHONE_PATTERNS.some((re) => re.test(feed));
+          const agentShown = touristRaw.filter((v) => String(v || '').trim()).join(' ');
+          if (inChat || w?.wrongPhoneAt) {
+            summary.wrongPhoneWaiting.push(c.id);
+            summary.rows.push(
+              mkRow(c, {
+                phonePresent: 'телефон агента',
+                asked: 'так',
+                agentNumber: agentShown,
+                status: 'Очікує вірний телефон туриста',
+                note: dryTag,
+              })
+            );
+            continue;
+          }
+          if (!config.dryRun && sends >= config.bulgaria.maxSendsPerRun) {
+            if (!capWarned) {
+              capWarned = true;
+              log.warn(`[BG] reached BG_MAX_SENDS_PER_RUN=${config.bulgaria.maxSendsPerRun}; the rest next cycle.`);
+            }
+            summary.waiting.push(c.id);
+            summary.rows.push(
+              mkRow(c, {
+                phonePresent: 'телефон агента',
+                asked: 'ні',
+                agentNumber: agentShown,
+                status: 'Очікує — ліміт надсилань циклу',
+                note: 'повідомлення піде наступного циклу',
+              })
+            );
+            continue;
+          }
+          if (config.dryRun) {
+            summary.wrongPhone.push(`${c.id} (dry)`);
+            log.info(`[BG] ${c.id}: «Телефон туриста» is the agent's number — WOULD ask for the right one.`);
+          } else {
+            await travelon.openChat(c.id);
+            try {
+              await travelon.sendChatMessage({
+                department: config.bulgaria.department,
+                subject: config.bulgaria.subject,
+                text: config.bulgaria.wrongPhoneText,
+                bundleId: c.id,
+              });
+            } finally {
+              await travelon.closeChat(c.id).catch(() => {});
+            }
+            sends += 1;
+            summary.wrongPhone.push(c.id);
+            log.info(`[BG] ${c.id}: «Телефон туриста» is the agent's number — asked for the right one.`);
+          }
+          await persist(c.id, { wrongPhoneAt: new Date().toISOString() });
+          summary.rows.push(
+            mkRow(c, {
+              phonePresent: 'телефон агента',
+              asked: config.dryRun ? 'ні (написав би)' : 'так',
+              agentNumber: agentShown,
+              status: 'Телефон агента замість туриста — попросили вказати вірний',
+              note: dryTag,
+            })
+          );
+          continue;
+        }
+
+        // (a) phone already in the comment fields? (bookings made before the field)
+        let phones = extractPhones(`${comments.user} ${comments.admin}`).filter((p) => !isAgent(p));
+        if (phones.length) {
+          await deliver(c, w, phones, isAgent, {
+            source: 'comments',
+            label: `телефон уже в коментарях заявки (${c.supplier})`,
+            writtenInBooking: 'так',
+          });
           continue;
         }
 
@@ -630,7 +755,7 @@ export async function runBulgaria(
           await openChatIfNeeded();
           chatText = await travelon.readChatPanelText();
         }
-        phones = extractPhones(chatText).filter((p) => p !== agentPhone);
+        phones = extractPhones(chatText).filter((p) => !isAgent(p));
         if (phones.length) {
           await closeChatIfOpen();
           await travelon.openEdit(c.id);
@@ -641,55 +766,11 @@ export async function runBulgaria(
               ', '
             )}] to both comment fields`
           );
-          const elineOk = c.writeToEline ? await elineWrite(c, phones, agentPhone) : true;
-          let itravelMsgAt = null;
-          if (c.messageItravel) {
-            try {
-              if (await messageItravelFor(c, phones, w)) itravelMsgAt = new Date().toISOString();
-            } catch (err) {
-              summary.errors.push(`${c.id}: Itravel message failed: ${err.message}`);
-              log.error(`[Itravel] ${c.id} message failed:`, err.message);
-            }
-          }
-          // Only close the booking once the SUPPLIER provably has the phone.
-          const supplierOk =
-            config.dryRun || (elineOk && (!c.messageItravel || Boolean(itravelMsgAt)));
-          await persist(c.id, {
-            ...(supplierOk ? { doneAt: new Date().toISOString() } : {}),
-            phones,
+          await deliver(c, w, phones, isAgent, {
             source: 'chat',
-            ...(itravelMsgAt ? { itravelMsgAt } : {}),
+            label: `номер із чату агента (${c.supplier})`,
+            writtenInBooking: config.dryRun ? 'ні (вписав би)' : 'так',
           });
-          summary.rows.push(
-            mkRow(c, {
-              phonePresent: 'так',
-              agentNumber: phones.join(' '),
-              writtenInBooking: config.dryRun ? 'ні (вписав би)' : 'так',
-              writtenInEline: c.writeToEline
-                ? config.dryRun
-                  ? 'ні (вписав би)'
-                  : elineOk
-                    ? 'так'
-                    : 'НІ — не підтверджено'
-                : 'не потрібно',
-              status: supplierOk
-                ? 'Зроблено'
-                : waitingRef.has(c.id) && elineOk
-                  ? WAIT_REF_STATUS
-                  : 'Помилка — постачальник не отримав',
-              note: [
-                dryTag,
-                `номер із чату агента (${c.supplier})`,
-                supplierOk
-                  ? ''
-                  : waitingRef.has(c.id) && elineOk
-                    ? WAIT_REF_NOTE
-                    : 'запис постачальнику не підтверджено — повтор наступного циклу',
-              ]
-                .filter(Boolean)
-                .join(' · '),
-            })
-          );
           continue;
         }
 
@@ -703,7 +784,7 @@ export async function runBulgaria(
               await el.openBooking(c.elineNum);
               return (await el.readPassengerPhones())
                 .filter(looksLikePhone)
-                .filter((p) => normalizeUaPhone(p) !== agentPhone);
+                .filter((p) => !isAgent(p));
             });
           } catch (err) {
             summary.errors.push(`${c.id}: Eline precheck failed: ${err.message}`);
@@ -735,7 +816,24 @@ export async function runBulgaria(
           }
         }
 
-        // (c) nowhere -> ask / remind
+        // (c) nowhere. Since 17.11.2026 «Телефон туриста» is mandatory in the basket
+        // of bus tours, so the agent is not asked any more (BG_ASK_ENABLED=true
+        // brings the ask + reminder back).
+        if (!config.bulgaria.askEnabled) {
+          await closeChatIfOpen();
+          summary.noPhone.push(c.id);
+          summary.rows.push(
+            mkRow(c, {
+              phonePresent: 'ні',
+              asked: w?.askedAt ? 'так (раніше)' : 'ні',
+              status: 'Без телефону — не питаємо',
+              note: [dryTag, 'поле «Телефон туриста» порожнє; запит агенту вимкнено 17.11.2026']
+                .filter(Boolean)
+                .join(' · '),
+            })
+          );
+          continue;
+        }
         const askInChat = BG_ASK_PATTERNS.some((re) => re.test(chatText));
         const remindInChat = BG_REMINDER_PATTERNS.some((re) => re.test(chatText));
         // A stored ask the chat feed does not hold was never delivered (until 11.2026
@@ -857,6 +955,10 @@ export async function runBulgaria(
       : []),
     `Waiting Itravel order №: ${summary.waitingRef.join(', ') || DASH}`,
     `Comment writes: ${summary.comments.join(', ') || DASH}`,
+    `Wrong phone (agent's number) — asked to fix: ${summary.wrongPhone.join(', ') || DASH}`,
+    `Waiting for the right phone: ${summary.wrongPhoneWaiting.join(', ') || DASH}`,
+    `Non-UA tourist phone (supplier by hand): ${summary.foreignPhone.join(', ') || DASH}`,
+    `No phone, not asked: ${summary.noPhone.length ? `${summary.noPhone.length} (${idList(summary.noPhone)})` : DASH}`,
     `Asked: ${summary.asked.join(', ') || DASH}`,
     `Reminded: ${summary.reminded.join(', ') || DASH}`,
     `Waiting: ${summary.waiting.join(', ') || DASH}`,

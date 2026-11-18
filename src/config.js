@@ -69,12 +69,9 @@ export const config = {
   ghostRecheck: bool(process.env.GHOST_RECHECK, false),
 
   // --- matching ---
-  targetCountries: list(process.env.TARGET_COUNTRIES, [
-    'Греція',
-    'Албанія',
-    'Хорватія',
-    'Іспанія',
-  ]),
+  // Іспанію й Албанію прибрано 17.11.2026 (Інна Корнієнко): у кошику цих країн
+  // тепер обов'язкове поле «Телефон туриста», тож агентів більше не питаємо.
+  targetCountries: list(process.env.TARGET_COUNTRIES, ['Греція', 'Хорватія']),
   targetStatuses: list(process.env.TARGET_STATUSES, ['Confirmed', 'Confirmed Print']),
   onlyToday: bool(process.env.ONLY_TODAY, true),
   // When onlyToday is on, still process bookings created within the last N days
@@ -203,6 +200,16 @@ export const config = {
     reminderText:
       process.env.BG_REMINDER_TEXT ||
       'Шановні колеги, доброго дня! Нагадуємо, що потрібно надати контакти туристів для водія. Дякуємо.',
+    // 17.11.2026: у кошику автобусних турів з'явилось обов'язкове поле «Телефон
+    // туриста» (passenger[][telephone]) — агентів більше НЕ питаємо і не нагадуємо.
+    // BG_ASK_ENABLED=true повертає старі запит + нагадування для заявок без номера.
+    askEnabled: bool(process.env.BG_ASK_ENABLED, false),
+    // Номер у полі «Телефон туриста» = телефон агента (картка користувача або поле
+    // Telephone заявки) -> одне повідомлення в чат заявки (Інна Корнієнко, 17.11.2026).
+    wrongPhoneEnabled: bool(process.env.BG_WRONG_PHONE_ENABLED, true),
+    wrongPhoneText:
+      process.env.BG_WRONG_PHONE_TEXT ||
+      "Шановні колеги, прохання вказати вірний телефон туристів для зв'язку з водієм та супроводжуючою. Заздалегідь дякуємо.",
   },
   // Eline supplier portal (same software as TravelON). SEPARATE login.
   eline: {
@@ -345,6 +352,8 @@ export const BG_ASK_PATTERNS = [
   /(?:надати|надіслати|вказати|прописати|скинути)\s+(?:\S+\s+){0,2}?(?:контакт|тел)\S*\s+турист/i,
 ];
 export const BG_REMINDER_PATTERNS = [/нагадуємо.*контакт/i, /нагадуємо.*воді/i];
+// The "agent's number instead of the tourist's" message is already in the chat.
+export const BG_WRONG_PHONE_PATTERNS = [/в[іi]рний\s+телефон/i];
 
 // Bus-seating warning: fallback text (used only if the subject's auto-filled
 // template comes up empty) + patterns that mean the warning is ALREADY in a chat.

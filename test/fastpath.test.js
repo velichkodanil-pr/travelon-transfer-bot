@@ -18,6 +18,8 @@ let TravelonClient;
 before(async () => {
   process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'transfer-fast-'));
   process.env.DRY_RUN = 'false';
+  // These tests cover the agent ask + reminder, off by default since 17.11.2026.
+  process.env.BG_ASK_ENABLED = 'true';
   process.env.REPORT_ENABLED = 'false';
   process.env.BUSWARN_ENABLED = 'false';
   process.env.INSDOC_ENABLED = 'false';
